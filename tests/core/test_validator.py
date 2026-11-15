@@ -7,7 +7,7 @@ import pytest
 
 from app.core import validator
 from app.core.models import EsimRecord
-from tests.conftest import FIXTURES_DIR, not_implemented
+from tests.conftest import FIXTURES_DIR
 
 # Synthetic codes only. Host is a reserved .invalid domain.
 HOST = "smdp.example.invalid"
@@ -346,16 +346,13 @@ def test_validate_issue_messages_are_nonempty_and_rows_correct() -> None:
     assert all(i.message for i in report.issues)
 
 
-@not_implemented
 def test_validate_report_ok_with_only_warnings() -> None:
-    # ValidationReport.ok/errors/warnings live in models.py, still a stub.
     report = validator.validate(_load_fixture("warning_iccid_prefix.csv"))
     assert report.ok is True
     assert report.errors == []
     assert len(report.warnings) == 1
 
 
-@not_implemented
 def test_validate_report_not_ok_with_errors() -> None:
     report = validator.validate(_load_fixture("mixed_valid_invalid.csv"))
     assert report.ok is False

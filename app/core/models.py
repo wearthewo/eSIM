@@ -10,6 +10,8 @@ from typing import Literal
 
 Severity = Literal["error", "warning"]
 
+_REDACTED = "'<redacted>'"
+
 
 class ParseError(Exception):
     """Raised when an upload cannot be read as a table.
@@ -40,7 +42,13 @@ class EsimRecord:
 
     def __repr__(self) -> str:
         """Return a repr with secrets redacted so they cannot leak via logs or tracebacks."""
-        raise NotImplementedError
+        confirmation = None if self.confirmation_code is None else _REDACTED
+        return (
+            f"EsimRecord(row_number={self.row_number!r}, iccid={self.iccid!r}, "
+            f"activation_code={_REDACTED}, confirmation_code={confirmation}, "
+            f"imsi={self.imsi!r}, msisdn={self.msisdn!r}, "
+            f"customer_name={self.customer_name!r}, plan_name={self.plan_name!r})"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,17 +77,17 @@ class ValidationReport:
     @property
     def errors(self) -> list[ValidationIssue]:
         """Issues with severity ``"error"``."""
-        raise NotImplementedError
+        return [i for i in self.issues if i.severity == "error"]
 
     @property
     def warnings(self) -> list[ValidationIssue]:
         """Issues with severity ``"warning"``."""
-        raise NotImplementedError
+        return [i for i in self.issues if i.severity == "warning"]
 
     @property
     def ok(self) -> bool:
         """True when there are no errors (warnings are allowed)."""
-        raise NotImplementedError
+        return not any(i.severity == "error" for i in self.issues)
 
 
 @dataclass(frozen=True, slots=True)
