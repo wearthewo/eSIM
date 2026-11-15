@@ -29,6 +29,7 @@ tests/ fixtures/ (synthetic data only)
 - Test: pytest -q
 - Lint: ruff check . && ruff format --check .
 - Run: uvicorn app.web.main:app --reload
+- Always use the project venv: .venv\Scripts\python.exe -m pytest / -m ruff. Never the python on PATH.
 
 ## Definition of done
 

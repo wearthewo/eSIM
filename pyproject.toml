@@ -15,6 +15,7 @@ dependencies = [
     "segno",
     "reportlab",
     "openpyxl",
+    "defusedxml",
 ]
 
 [project.optional-dependencies]
