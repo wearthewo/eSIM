@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "esim"
+version = "0.1.0"
+description = "Upload eSIM activation codes, get a ZIP of branded QR-code PDFs."
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "jinja2",
+    "python-multipart",
+    "segno",
+    "reportlab",
+    "openpyxl",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff", "httpx"]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.setuptools.package-data]
+"app.core" = ["assets/fonts/*"]
+"app.web" = ["templates/*.html", "static/*", "static/brand/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["app/web/static"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S", "T20"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]

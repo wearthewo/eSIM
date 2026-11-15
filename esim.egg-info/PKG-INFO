@@ -1,0 +1,16 @@
+Metadata-Version: 2.4
+Name: esim
+Version: 0.1.0
+Summary: Upload eSIM activation codes, get a ZIP of branded QR-code PDFs.
+Requires-Python: >=3.12
+Requires-Dist: fastapi
+Requires-Dist: uvicorn[standard]
+Requires-Dist: jinja2
+Requires-Dist: python-multipart
+Requires-Dist: segno
+Requires-Dist: reportlab
+Requires-Dist: openpyxl
+Provides-Extra: dev
+Requires-Dist: pytest; extra == "dev"
+Requires-Dist: ruff; extra == "dev"
+Requires-Dist: httpx; extra == "dev"

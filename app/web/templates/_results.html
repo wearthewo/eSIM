@@ -1,0 +1,12 @@
+{# Partial: validation summary. Rows and fields only, never secret values. #}
+<section>
+  <p>{{ report.errors | length }} error(s), {{ report.warnings | length }} warning(s).</p>
+  <table>
+    <thead><tr><th>Row</th><th>Field</th><th>Severity</th><th>Problem</th></tr></thead>
+    <tbody>
+    {% for issue in report.issues %}
+      <tr><td>{{ issue.row_number }}</td><td>{{ issue.field }}</td><td>{{ issue.severity }}</td><td>{{ issue.message }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>

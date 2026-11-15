@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>eSIM PDF generator</h1>
+<form hx-post="/upload" hx-encoding="multipart/form-data" hx-target="#results">
+  <input type="file" name="file" accept=".csv,.xlsx" required>
+  <button type="submit">Generate</button>
+</form>
+<div id="results"></div>
+{% endblock %}

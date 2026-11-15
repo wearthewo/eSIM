@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+jinja2
+python-multipart
+segno
+reportlab
+openpyxl
+
+[dev]
+pytest
+ruff
+httpx

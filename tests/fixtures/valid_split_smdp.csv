@@ -1,0 +1,4 @@
+iccid,smdp_address,matching_id,confirmation_code
+8999000000000000203,smdp.example.invalid,TEST-0020-SPLIT,
+8999000000000000211,smdp.example.invalid,TEST-0021-SPLIT,
+8999000000000000229,smdp.example.invalid,TEST-0022-SPLIT,

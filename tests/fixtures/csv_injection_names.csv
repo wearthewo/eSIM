@@ -1,0 +1,6 @@
+iccid,activation_code,customer_name
+8999000000000001508,LPA:1$smdp.example.invalid$TEST-0150-AAAA-BBBB,=HYPERLINK("http://example.invalid")
+8999000000000001516,LPA:1$smdp.example.invalid$TEST-0151-AAAA-BBBB,+1+1
+8999000000000001524,LPA:1$smdp.example.invalid$TEST-0152-AAAA-BBBB,-2+3
+8999000000000001532,LPA:1$smdp.example.invalid$TEST-0153-AAAA-BBBB,@SUM(A1)
+8999000000000001540,LPA:1$smdp.example.invalid$TEST-0154-AAAA-BBBB,"	Tabbed"
