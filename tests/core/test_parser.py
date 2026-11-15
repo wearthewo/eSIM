@@ -165,6 +165,34 @@ def test_parse_csv_blank_and_whitespace_rows(fixture_bytes) -> None:
     ]
 
 
+def test_parse_csv_row_with_only_unknown_columns_is_blank() -> None:
+    records = _csv(f"notes,iccid,activation_code\nonly a note,,\n,{ICCID1},{AC1}\n")
+    assert [r.row_number for r in records] == [3]
+
+
+def test_csv_and_xlsx_same_data_give_identical_records(xlsx_bytes) -> None:
+    rows: list[list[str | None]] = [
+        ["Notes", "ICCID", "Activation_Code", "MSISDN", "Customer_Name", "Internal"],
+        ["only a note", None, None, None, None, "x"],
+        [
+            None,
+            f"  {ICCID1} ",
+            "lpa:1$smdp.example.invalid$TEST-0001-AAAA-BBBB",
+            "+30 (690) 1",
+            "Γιώργος",
+            None,
+        ],
+        [None, None, None, None, None, None],
+        ["   ", "  ", None, None, None, "ref-1"],
+        ["note", ICCID2, AC2, None, None, None],
+    ]
+    csv_text = "\n".join(",".join(cell or "" for cell in row) for row in rows) + "\n"
+    from_csv = parser.parse_csv(csv_text.encode("utf-8"))
+    from_xlsx = parser.parse_xlsx(xlsx_bytes(rows))
+    assert from_csv == from_xlsx
+    assert [r.row_number for r in from_csv] == [3, 6]
+
+
 def test_parse_csv_row_numbers_are_source_rows_with_crlf() -> None:
     data = f"iccid,activation_code\r\n\r\n{ICCID1},{AC1}\r\n,\r\n{ICCID2},{AC2}\r\n".encode()
     records = parser.parse_csv(data)

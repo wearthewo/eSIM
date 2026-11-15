@@ -69,7 +69,8 @@ def parse_csv(data: bytes) -> list[EsimRecord]:
     """Parse CSV bytes with the stdlib ``csv`` module.
 
     Decodes UTF-8 (BOM allowed), detects ``,`` or ``;`` delimiters, trims
-    whitespace, skips fully blank rows, and enforces ``MAX_ROWS``. All cells stay
+    whitespace, skips rows whose known columns are all empty (values in unknown
+    columns are ignored, as in ``parse_xlsx``), and enforces ``MAX_ROWS``. All cells stay
     ``str``. Raises ``ParseError``.
     """
     try:
@@ -229,10 +230,15 @@ def _trim(value: str | None) -> Cell:
 def _build_records(
     rows: Iterable[tuple[int, list[Cell]]], columns: dict[str, int]
 ) -> list[EsimRecord]:
-    """Turn trimmed rows into records, skipping blank rows and enforcing ``MAX_ROWS``."""
+    """Turn trimmed rows into records, skipping blank rows and enforcing ``MAX_ROWS``.
+
+    A row is blank when every known column is empty; values in unknown columns
+    are ignored, so CSV and XLSX skip exactly the same rows.
+    """
+    indices = tuple(columns.values())
     records: list[EsimRecord] = []
     for number, cells in rows:
-        if all(c is None for c in cells):
+        if all(i >= len(cells) or cells[i] is None for i in indices):
             continue
         if len(records) >= MAX_ROWS:
             raise ParseError(f"Too many rows: the limit is {MAX_ROWS} data rows per upload.")
