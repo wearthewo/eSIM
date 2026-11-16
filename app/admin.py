@@ -8,6 +8,7 @@ Commands:
   reset-link --email X                              prints a one-time set-password link
   disable-user --email X                            also ends the user's sessions
   enable-user --email X
+  purge                                             deletes rows past retention; prints counts
 
 Links are ``PUBLIC_BASE_URL/invite/<token>`` and expire after 48 hours. Each link is
 printed once and only its SHA-256 is stored, so a lost link cannot be shown again:
@@ -26,7 +27,7 @@ from typing import TextIO
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app.auth import accounts
+from app.auth import accounts, retention
 from app.auth.accounts import AdminError
 from app.db.models import Role
 from app.settings import Settings, SettingsError, get_settings
@@ -52,6 +53,7 @@ def _parser() -> argparse.ArgumentParser:
     cmd.add_argument("--email", required=True)
     cmd = commands.add_parser("enable-user", help="enable a user again")
     cmd.add_argument("--email", required=True)
+    commands.add_parser("purge", help="delete rows past their retention; prints counts")
     return parser
 
 
@@ -77,6 +79,9 @@ def _run(args: argparse.Namespace, db: Session, settings: Settings, now: datetim
         case "enable-user":
             accounts.set_user_disabled(db, args.email, False)
             return "enabled"
+        case "purge":
+            counts = retention.purge(db, now=now)
+            return "\n".join(f"{table}: {n}" for table, n in counts.items())
     raise AdminError("unknown command")  # argparse rejects it first
 
 

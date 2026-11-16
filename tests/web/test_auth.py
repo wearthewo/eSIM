@@ -21,6 +21,7 @@ from app.auth.tokens import FORM_TOKEN_MAX_AGE_SECONDS, csrf_for, new_token, sig
 from app.db.models import Role
 from app.settings import Settings
 from app.web import auth
+from app.web.admin import require_superadmin
 from app.web.auth import (
     CSRF_HEADER,
     MSG_FORBIDDEN,
@@ -31,6 +32,7 @@ from app.web.auth import (
     SESSION_COOKIE,
 )
 from app.web.main import SECURITY_HEADERS
+from app.web.team import require_owner
 from tests.web.conftest import (
     ANON_IP,
     EMAIL,
@@ -40,6 +42,7 @@ from tests.web.conftest import (
     LoggedIn,
     now,
 )
+from tests.web.management_routes import MANAGEMENT_PATHS, MANAGEMENT_POSTS
 
 Browser = Callable[..., TestClient]
 NEW_PASSWORD = "a brand new synthetic passphrase"
@@ -410,15 +413,20 @@ def _routes(app: FastAPI) -> list:
 
 
 def test_every_app_route_is_protected_or_known_public(web_app: FastAPI) -> None:
-    public = {"/healthz", "/login", "/invite/{token}", "/static"}
+    public = {"/healthz", "/login", "/invite/{token}", "/request-access", "/static"}
     checked = set()
     for route in _routes(web_app):
         if route.path in public:
             continue
         dependencies = [d.call for d in route.dependant.dependencies]
         assert auth.require_user in dependencies, route.path
+        if route.path.startswith("/admin"):
+            assert require_superadmin in dependencies, route.path
+        if route.path.startswith("/team"):
+            assert require_owner in dependencies, route.path
         checked.add(route.path)
-    assert checked == {"/", "/template.xlsx", "/validate", "/generate", "/logout"}
+    core = {"/", "/template.xlsx", "/validate", "/generate", "/logout"}
+    assert checked == core | MANAGEMENT_PATHS
 
 
 @pytest.mark.parametrize("path", ["/healthz", "/login", "/static/app.css", "/static/app.js"])
@@ -439,12 +447,13 @@ def _post_routes(app: FastAPI) -> list[str]:
         route.path
         for route in _routes(app)
         if "POST" in (getattr(route, "methods", None) or set())
-        and route.path not in {"/login", "/invite/{token}"}
+        and route.path not in {"/login", "/invite/{token}", "/request-access"}
     )
 
 
 def test_post_routes_are_known(web_app: FastAPI) -> None:
-    assert _post_routes(web_app) == ["/generate", "/logout", "/validate"]
+    expected = ["/generate", "/logout", "/validate", *MANAGEMENT_POSTS]
+    assert _post_routes(web_app) == sorted(expected)
 
 
 @pytest.mark.parametrize("token", [None, "", "wrong", "other-session"])

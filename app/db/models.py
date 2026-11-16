@@ -333,6 +333,8 @@ class AuditLog(Base):
     id: Mapped[int] = _id()
     created_at: Mapped[dt.datetime] = _created_at(index=True)
     user_id: Mapped[int | None] = _fk("users.id", "SET NULL", nullable=True, index=True)
+    # The user the action was done to (disabled, invited, sent a reset link), if any.
+    target_user_id: Mapped[int | None] = _fk("users.id", "SET NULL", nullable=True, index=True)
     organization_id: Mapped[int | None] = _fk("organizations.id", "SET NULL", nullable=True)
     action: Mapped[str] = mapped_column(String(MAX_ACTION_CHARS))
     outcome: Mapped[AuditOutcome] = mapped_column(_enum(AuditOutcome, "outcome"))

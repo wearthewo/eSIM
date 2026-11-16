@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}{{ org.name }} · Admin{% endblock %}
+{% block content %}
+<p><a href="/admin/orgs">All organizations</a></p>
+<h1>{{ org.name }}</h1>
+{% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+
+<div class="status-row">
+  Status: {% if org.disabled %}<strong>disabled</strong>{% else %}enabled{% endif %}
+  <form method="post" action="/admin/orgs/{{ org.id }}/{% if org.disabled %}enable{% else %}disable{% endif %}" class="inline">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button type="submit">{% if org.disabled %}Enable organization{% else %}Disable organization{% endif %}</button>
+  </form>
+</div>
+
+<form method="post" action="/admin/orgs/{{ org.id }}/quota" class="row-form">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <label for="daily_row_quota">Daily quota (rows per UTC day)</label>
+  <input id="daily_row_quota" type="number" name="daily_row_quota" min="0" max="{{ max_quota }}" step="1" required value="{{ org.daily_row_quota }}">
+  <button type="submit">Save quota</button>
+</form>
+
+<h2>Users</h2>
+{% if not users %}
+<p>No users yet.</p>
+{% else %}
+<table class="admin-table">
+  <thead>
+    <tr><th>Email</th><th>Role</th><th>Last login</th><th>Status</th><th>Actions</th></tr>
+  </thead>
+  <tbody>
+    {% for u in users %}
+    <tr>
+      <td>{{ u.email }}{% if u.is_superadmin %} (superadmin){% endif %}</td>
+      <td>{{ u.role.value }}</td>
+      <td>{% if u.has_password %}{{ u.last_login_at | utc }}{% else %}invited, no password yet{% endif %}</td>
+      <td>{% if u.disabled %}<strong>disabled</strong>{% else %}enabled{% endif %}</td>
+      <td class="actions">
+        {% if u.id != current_user.user_id %}
+        <form method="post" action="/admin/users/{{ u.id }}/reset-link" class="inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit"{% if u.disabled %} disabled{% endif %}>Reset link</button>
+        </form>
+        <form method="post" action="/admin/users/{{ u.id }}/{% if u.disabled %}enable{% else %}disable{% endif %}" class="inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit">{% if u.disabled %}Enable{% else %}Disable{% endif %}</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<h2>Invite a user</h2>
+<form method="post" action="/admin/orgs/{{ org.id }}/invite" class="auth-form">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <label for="invite_email">Email</label>
+  <input id="invite_email" type="email" name="email" required maxlength="254">
+  <label for="invite_role">Role</label>
+  <select id="invite_role" name="role">
+    {% for r in roles %}<option value="{{ r }}"{% if r == "member" %} selected{% endif %}>{{ r }}</option>{% endfor %}
+  </select>
+  <p><button type="submit">Create invite link</button></p>
+</form>
+{% endblock %}

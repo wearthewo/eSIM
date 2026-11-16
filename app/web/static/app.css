@@ -19,6 +19,23 @@ button { font-size: 1rem; padding: 0.5rem 1rem; }
 .auth-form input[type="email"], .auth-form input[type="password"] {
   width: 100%; max-width: 30rem; box-sizing: border-box; }
 
+.site-nav { display: flex; gap: 1rem; margin-right: auto; }
+.auth-form input[type="text"], .auth-form select, .auth-form textarea {
+  width: 100%; max-width: 30rem; box-sizing: border-box; }
+
+/* Request-access honeypot: off-screen, never seen by people (no inline style: CSP). */
+.hp-field { position: absolute; left: -10000px; top: auto; width: 1px; height: 1px;
+  overflow: hidden; }
+
+/* Admin and team pages. */
+.admin-table td.note { white-space: pre-wrap; max-width: 20rem; overflow-wrap: anywhere; }
+.admin-table td.actions { white-space: nowrap; }
+form.inline { display: inline; margin: 0; }
+.admin-table button, form.inline button { font-size: 0.85rem; padding: 0.2rem 0.6rem; }
+.status-row, .row-form { margin: 0.75rem 0; }
+.copy-row { display: flex; gap: 0.5rem; align-items: center; }
+.link-field { flex: 1; max-width: 40rem; font-family: ui-monospace, monospace; }
+
 /* htmx's injected indicator styles are disabled (CSP), so they live here. */
 .htmx-indicator { display: none; }
 .htmx-request .htmx-indicator, .htmx-request.htmx-indicator { display: inline; }

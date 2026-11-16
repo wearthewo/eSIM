@@ -14,8 +14,9 @@ are not Secure; everything else is the same.
 
 CSRF: every POST behind ``require_user`` needs the session's CSRF token, in the
 ``X-CSRF-Token`` header (htmx, app.js) or, for urlencoded forms, the
-``csrf_token`` field. /login and /invite/<token> have no session yet and use a
-signed form token tied to the pre-auth cookie instead (``app.auth.tokens``).
+``csrf_token`` field. /login, /invite/<token> and /request-access have no session
+yet and use a signed form token tied to the pre-auth cookie instead
+(``app.auth.tokens``; ``form_page`` and ``check_form`` here).
 
 Never log passwords, tokens or emails. ``RedactInviteTokens`` keeps link tokens
 out of the uvicorn access log.
@@ -34,7 +35,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse, Response
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.auth import accounts
+from app.auth import access, accounts
 from app.auth.accounts import SESSION_ABSOLUTE_TTL, CurrentUser, LinkTarget
 from app.auth.passwords import (
     MAX_PASSWORD_CHARS,
@@ -131,7 +132,7 @@ def _settings(request: Request) -> Settings:
     return request.app.state.settings
 
 
-def _sessions(request: Request) -> sessionmaker[Session]:
+def sessions_of(request: Request) -> sessionmaker[Session]:
     return request.app.state.sessionmaker
 
 
@@ -142,7 +143,7 @@ def _secret_key(request: Request) -> bytes:
     return key.reveal().encode("utf-8")
 
 
-def _now() -> datetime:
+def utc_now() -> datetime:
     return datetime.now(UTC)
 
 
@@ -159,21 +160,26 @@ def client_ip_prefix(request: Request) -> accounts.IpPrefix | None:
         return None
 
 
-async def read_small_form(request: Request) -> dict[str, str]:
-    """Read an urlencoded body of at most ``MAX_FORM_BYTES`` into ``{name: first value}``.
+async def read_small_form(request: Request, *, max_bytes: int = MAX_FORM_BYTES) -> dict[str, str]:
+    """Read an urlencoded body of at most ``max_bytes`` into ``{name: first value}``.
 
     Streams with a cap (no unbounded read). Raises ``FormTooLarge`` or ``AuthError``.
+    The result is kept on ``request.state``: the body can be read only once, and
+    ``require_user`` reads it for the CSRF field before the route reads the rest.
     """
+    cached: dict[str, str] | None = getattr(request.state, "small_form", None)
+    if cached is not None:
+        return cached
     content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
     if content_type != "application/x-www-form-urlencoded":
         raise AuthError
     declared = request.headers.get("content-length")
-    if declared is not None and (not declared.isdigit() or int(declared) > MAX_FORM_BYTES):
+    if declared is not None and (not declared.isdigit() or int(declared) > max_bytes):
         raise FormTooLarge
     body = bytearray()
     async for chunk in request.stream():
         body += chunk
-        if len(body) > MAX_FORM_BYTES:
+        if len(body) > max_bytes:
             raise FormTooLarge
     try:
         parsed = parse_qs(
@@ -184,7 +190,9 @@ async def read_small_form(request: Request) -> dict[str, str]:
         )
     except (UnicodeDecodeError, ValueError):
         raise AuthError from None
-    return {name: values[0] for name, values in parsed.items()}
+    form = {name: values[0] for name, values in parsed.items()}
+    request.state.small_form = form
+    return form
 
 
 # --- Cookies ------------------------------------------------------------------------
@@ -237,21 +245,26 @@ def _preauth_nonce(request: Request) -> str | None:
 # --- The dependency -------------------------------------------------------------------
 
 
-def _resolve(sessions: sessionmaker[Session], token: str) -> CurrentUser | None:
+def _resolve(sessions: sessionmaker[Session], token: str) -> tuple[CurrentUser | None, int]:
+    """The session's user and, for superadmins, the number of pending access requests."""
     with sessions.begin() as db:
-        return accounts.resolve_session(db, token, now=_now())
+        user = accounts.resolve_session(db, token, now=utc_now())
+        pending = access.pending_count(db) if user is not None and user.is_superadmin else 0
+        return user, pending
 
 
 async def require_user(request: Request) -> CurrentUser:
     """The logged-in user; raises ``LoginRequired`` or (POST without CSRF token) ``CsrfFailed``.
 
-    Sets ``request.state.user`` and ``request.state.csrf_token`` for the templates.
+    Sets ``request.state.user``, ``request.state.csrf_token`` and (superadmins)
+    ``request.state.pending_requests`` for the templates.
     """
     settings = _settings(request)
     token = request.cookies.get(cookie_name(settings, SESSION_COOKIE))
     if not token:
         raise LoginRequired
-    user = await run_in_threadpool(_resolve, _sessions(request), token)
+    user, pending = await run_in_threadpool(_resolve, sessions_of(request), token)
+    request.state.pending_requests = pending
     if user is None:
         raise LoginRequired
     if request.method not in SAFE_METHODS:
@@ -270,7 +283,7 @@ async def require_user(request: Request) -> CurrentUser:
 # --- Pages without a session: signed form tokens --------------------------------------
 
 
-def _form_page(
+def form_page(
     request: Request,
     template: str,
     purpose: str,
@@ -306,7 +319,7 @@ def _form_page(
     return response
 
 
-def _check_form(request: Request, purpose: str, form: dict[str, str]) -> str:
+def check_form(request: Request, purpose: str, form: dict[str, str]) -> str:
     """The submitted form token if valid for ``purpose`` and this browser; else ``CsrfFailed``."""
     token = form.get(FORM_TOKEN_FIELD)
     if token is None or not check_form_token(
@@ -336,7 +349,7 @@ def _login_page(
     status_code: int = 200,
     form_token: str | None = None,
 ) -> HTMLResponse:
-    return _form_page(
+    return form_page(
         request,
         "login.html",
         LOGIN_PURPOSE,
@@ -359,7 +372,7 @@ def _login(
     ip: accounts.IpPrefix | None,
 ) -> str | None:
     with sessions.begin() as db:
-        now = _now()
+        now = utc_now()
         user = accounts.attempt_login(db, email, password, ip=ip, now=now)
         if user is None:
             return None
@@ -370,11 +383,11 @@ def _login(
 @router.post(LOGIN_PATH, response_model=None)
 async def login(request: Request) -> Response:
     form = await read_small_form(request)
-    form_token = _check_form(request, LOGIN_PURPOSE, form)
+    form_token = check_form(request, LOGIN_PURPOSE, form)
     old_token = request.cookies.get(cookie_name(_settings(request), SESSION_COOKIE))
     session_token = await run_in_threadpool(
         _login,
-        _sessions(request),
+        sessions_of(request),
         form.get("email", ""),
         form.get("password", ""),
         old_token,
@@ -397,7 +410,7 @@ def _logout(
             db,
             accounts.LOGOUT,
             AuditOutcome.SUCCESS,
-            now=_now(),
+            now=utc_now(),
             user_id=user.user_id,
             organization_id=user.organization_id,
             ip=ip,
@@ -408,7 +421,7 @@ def _logout(
 async def logout(request: Request, user: Annotated[CurrentUser, Depends(require_user)]) -> Response:
     settings = _settings(request)
     token = request.cookies.get(cookie_name(settings, SESSION_COOKIE))
-    await run_in_threadpool(_logout, _sessions(request), token, user, client_ip_prefix(request))
+    await run_in_threadpool(_logout, sessions_of(request), token, user, client_ip_prefix(request))
     response = RedirectResponse(LOGIN_PATH, status_code=303, headers=NO_STORE)
     _clear_cookie(response, settings, SESSION_COOKIE)
     return response
@@ -440,7 +453,7 @@ def _set_password_page(
     status_code: int = 200,
     form_token: str | None = None,
 ) -> HTMLResponse:
-    return _form_page(
+    return form_page(
         request,
         "set_password.html",
         _link_purpose(token),
@@ -459,12 +472,12 @@ def _set_password_page(
 
 def _find_link(sessions: sessionmaker[Session], token: str) -> LinkTarget | None:
     with sessions.begin() as db:
-        return accounts.find_link(db, token, now=_now())
+        return accounts.find_link(db, token, now=utc_now())
 
 
 @router.get("/invite/{token}", response_class=HTMLResponse)
 async def link_form(request: Request, token: str) -> HTMLResponse:
-    target = await run_in_threadpool(_find_link, _sessions(request), token)
+    target = await run_in_threadpool(_find_link, sessions_of(request), token)
     if target is None:
         return _invalid_link(request)
     return _set_password_page(request, token, target)
@@ -478,7 +491,7 @@ def _use_link(
     ip: accounts.IpPrefix | None,
 ) -> str | None:
     with sessions.begin() as db:
-        now = _now()
+        now = utc_now()
         target = accounts.consume_link(db, token, password_hash, ip=ip, now=now)
         if target is None:
             return None
@@ -489,8 +502,8 @@ def _use_link(
 @router.post("/invite/{token}", response_model=None)
 async def set_password(request: Request, token: str) -> Response:
     form = await read_small_form(request)
-    form_token = _check_form(request, _link_purpose(token), form)
-    target = await run_in_threadpool(_find_link, _sessions(request), token)
+    form_token = check_form(request, _link_purpose(token), form)
+    target = await run_in_threadpool(_find_link, sessions_of(request), token)
     if target is None:
         return _invalid_link(request)
 
@@ -508,7 +521,7 @@ async def set_password(request: Request, token: str) -> Response:
     password_hash = await run_in_threadpool(hash_password, password)
     old_token = request.cookies.get(cookie_name(_settings(request), SESSION_COOKIE))
     session_token = await run_in_threadpool(
-        _use_link, _sessions(request), token, password_hash, old_token, client_ip_prefix(request)
+        _use_link, sessions_of(request), token, password_hash, old_token, client_ip_prefix(request)
     )
     if session_token is None:
         return _invalid_link(request)

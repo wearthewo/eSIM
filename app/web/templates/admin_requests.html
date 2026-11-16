@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}Access requests · Admin{% endblock %}
+{% block content %}
+<h1>Access requests{% if handled %} (handled){% endif %}</h1>
+<p>
+  {% if handled %}<a href="/admin/requests">Show pending requests</a>
+  {% else %}<a href="/admin/requests?show=handled">Show handled requests</a>{% endif %}
+  · <a href="/admin/orgs">Organizations</a>
+</p>
+{% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+{% if not rows %}
+<p>{% if handled %}No handled requests.{% else %}No pending requests.{% endif %}</p>
+{% else %}
+<table class="admin-table">
+  <thead>
+    <tr>
+      <th>Date</th><th>Company</th><th>Contact</th><th>Email</th><th>Volume</th><th>Note</th>
+      {% if handled %}<th>Status</th><th>Handled</th>{% else %}<th>Actions</th>{% endif %}
+    </tr>
+  </thead>
+  <tbody>
+    {% for r in rows %}
+    <tr>
+      <td>{{ r.created_at | utc }}</td>
+      <td>{{ r.company_name }}</td>
+      <td>{{ r.contact_name }}</td>
+      <td>{{ r.email }}</td>
+      <td>{{ bands[r.volume_band] }}</td>
+      <td class="note">{{ r.note or "" }}</td>
+      {% if handled %}
+      <td>{{ r.status.value }}</td>
+      <td>{{ r.handled_at | utc }}{% if r.handled_by_email %} by {{ r.handled_by_email }}{% endif %}</td>
+      {% else %}
+      <td class="actions">
+        <form method="post" action="/admin/requests/{{ r.id }}/approve" class="inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit">Approve</button>
+        </form>
+        <form method="post" action="/admin/requests/{{ r.id }}/reject" class="inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit">Reject</button>
+        </form>
+      </td>
+      {% endif %}
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

@@ -85,7 +85,7 @@ def normalize_email(raw: str) -> str:
     return email
 
 
-def _user_by_email(db: Session, email: str) -> User | None:
+def user_by_email(db: Session, email: str) -> User | None:
     return db.scalars(select(User).where(func.lower(User.email) == email.strip().lower())).first()
 
 
@@ -98,11 +98,14 @@ def audit(
     user_id: int | None = None,
     organization_id: int | None = None,
     ip: IpPrefix | None = None,
+    target_user_id: int | None = None,
 ) -> None:
+    """Add an audit row. ``user_id`` is who acted, ``target_user_id`` who it was done to."""
     db.add(
         AuditLog(
             created_at=now,
             user_id=user_id,
+            target_user_id=target_user_id,
             organization_id=organization_id,
             action=action,
             outcome=outcome,
@@ -141,7 +144,7 @@ def attempt_login(
     a password yet and rate-limited attempts all return ``None`` after the same
     work (one argon2 verify), so callers can answer them identically.
     """
-    user = _user_by_email(db, email) if len(email) <= MAX_EMAIL_CHARS else None
+    user = user_by_email(db, email) if len(email) <= MAX_EMAIL_CHARS else None
 
     since = now - FAILURE_WINDOW
     locked = False
@@ -283,7 +286,7 @@ def _usable_invite(db: Session, token_hash: bytes, now: dt.datetime) -> LinkTarg
     ).first()
     if invite is None:
         return None
-    user = _user_by_email(db, invite.email)
+    user = user_by_email(db, invite.email)
     if (
         user is None
         or user.organization_id != invite.organization_id
@@ -368,7 +371,7 @@ def create_org(db: Session, name: str) -> int:
     return org.id
 
 
-def _new_password_token(db: Session, user_id: int, now: dt.datetime) -> str:
+def new_password_token(db: Session, user_id: int, now: dt.datetime) -> str:
     """A new set-password link for the user; earlier unused ones stop working."""
     db.execute(
         update(PasswordToken)
@@ -383,12 +386,12 @@ def _new_password_token(db: Session, user_id: int, now: dt.datetime) -> str:
 def create_superadmin(db: Session, email: str, *, now: dt.datetime) -> str:
     """A superadmin without organization; returns the token of a set-password link."""
     email = normalize_email(email)
-    if _user_by_email(db, email) is not None:
+    if user_by_email(db, email) is not None:
         raise AdminError("a user with this email already exists (use reset-link)")
     user = User(email=email, is_superadmin=True, organization_id=None, role=Role.MEMBER)
     db.add(user)
     db.flush()
-    return _new_password_token(db, user.id, now)
+    return new_password_token(db, user.id, now)
 
 
 def invite(
@@ -411,7 +414,7 @@ def invite(
         raise AdminError("no organization with this id")
     if org.disabled:
         raise AdminError("the organization is disabled")
-    user = _user_by_email(db, email)
+    user = user_by_email(db, email)
     if user is None:
         user = User(email=email, organization_id=organization_id, role=role)
         db.add(user)
@@ -443,17 +446,17 @@ def invite(
 
 def reset_link(db: Session, email: str, *, now: dt.datetime) -> str:
     """A set-password link for an existing, enabled user; returns the token."""
-    user = _user_by_email(db, email)
+    user = user_by_email(db, email)
     if user is None:
         raise AdminError("no user with this email")
     if user.disabled:
         raise AdminError("the user is disabled (enable-user first)")
-    return _new_password_token(db, user.id, now)
+    return new_password_token(db, user.id, now)
 
 
 def set_user_disabled(db: Session, email: str, disabled: bool) -> None:
     """Disable (and log out) or enable a user."""
-    user = _user_by_email(db, email)
+    user = user_by_email(db, email)
     if user is None:
         raise AdminError("no user with this email")
     user.disabled = disabled

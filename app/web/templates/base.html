@@ -15,6 +15,14 @@
 <body{% if csrf_token %} hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'{% endif %}>
   {% if current_user %}
   <header class="site-header">
+    <nav class="site-nav">
+      <a href="/">Generate</a>
+      {% if current_user.role == "owner" and current_user.organization_id %}<a href="/team">Team</a>{% endif %}
+      {% if current_user.is_superadmin %}
+      <a href="/admin/orgs">Admin</a>
+      <a href="/admin/requests">Requests ({{ pending_requests }})</a>
+      {% endif %}
+    </nav>
     <span class="who">{{ current_user.email }}</span>
     <form method="post" action="/logout" class="logout">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">

@@ -8,23 +8,40 @@ Settings come from ``get_settings()`` unless passed in (tests pass their own).
 Bad settings raise ``SettingsError``, so the app refuses to start. ``app`` (for
 ``uvicorn app.web.main:app``) is built on first access, so importing this module
 reads no settings.
+
+Retention: the app's lifespan runs ``retention.purge_if_due`` once at startup and
+then every ``RETENTION_CHECK_SECONDS`` in a background task. The check lives in
+the database (an advisory lock plus the day's ``retention_purge`` audit row), so
+with several workers, restarts and deploys the purge still runs at most once per
+UTC day, and no request ever waits for it. A failure is logged by exception class
+only and retried at the next check.
 """
 
 from __future__ import annotations
 
+import asyncio
+import logging
+from collections.abc import AsyncIterator, Callable
+from contextlib import AbstractAsyncContextManager, asynccontextmanager, suppress
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import FastAPI, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session, sessionmaker
 from starlette.datastructures import MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from app.auth import retention
 from app.db.engine import make_engine
 from app.settings import Settings, check_web_settings, get_settings
-from app.web import auth
+from app.web import admin, auth, public, team
 from app.web.routes import router
+
+RETENTION_CHECK_SECONDS = 60 * 60
+logger = logging.getLogger(__name__)
 
 STATIC_DIR: Path = Path(__file__).parent / "static"
 
@@ -87,11 +104,53 @@ async def healthz() -> PlainTextResponse:
     return PlainTextResponse("ok", headers={"Cache-Control": "no-store"})
 
 
+def _purge_if_due(sessions: sessionmaker[Session]) -> None:
+    with sessions.begin() as db:
+        retention.purge_if_due(db, now=datetime.now(UTC))
+
+
+async def _check_retention(sessions: sessionmaker[Session]) -> None:
+    try:
+        await run_in_threadpool(_purge_if_due, sessions)
+    except Exception as exc:  # never the message: it could include the database URL
+        logger.warning("retention purge failed (%s)", type(exc).__name__)
+
+
+async def _retention_loop(sessions: sessionmaker[Session]) -> None:
+    while True:
+        await asyncio.sleep(RETENTION_CHECK_SECONDS)
+        await _check_retention(sessions)
+
+
+def _lifespan(
+    sessions: sessionmaker[Session] | None, run_retention: bool
+) -> Callable[[FastAPI], AbstractAsyncContextManager[None]]:
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        task = None
+        if run_retention and sessions is not None:
+            await _check_retention(sessions)  # at startup, before serving
+            task = asyncio.create_task(_retention_loop(sessions))
+        try:
+            yield
+        finally:
+            if task is not None:
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+
+    return lifespan
+
+
 def create_app(
-    settings: Settings | None = None, *, sessions: sessionmaker[Session] | None = None
+    settings: Settings | None = None,
+    *,
+    sessions: sessionmaker[Session] | None = None,
+    run_retention: bool = True,
 ) -> FastAPI:
     """Build the FastAPI app: debug off, no API docs, security headers, static files,
-    auth, routes. ``sessions`` defaults to a sessionmaker on ``DATABASE_URL``."""
+    auth, routes. ``sessions`` defaults to a sessionmaker on ``DATABASE_URL``.
+    ``run_retention`` starts the daily purge with the app (tests turn it off)."""
     settings = settings if settings is not None else get_settings()
     check_web_settings(settings)
     if sessions is None and settings.database_url is not None:  # checked just above
@@ -104,6 +163,7 @@ def create_app(
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
+        lifespan=_lifespan(sessions, run_retention),
     )
     app.state.settings = settings
     app.state.sessionmaker = sessions
@@ -113,6 +173,9 @@ def create_app(
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
     app.add_api_route("/healthz", healthz, methods=["GET"], response_model=None)
     app.include_router(auth.router)
+    app.include_router(public.router)
+    app.include_router(admin.router)
+    app.include_router(team.router)
     app.include_router(router)
     auth.install_log_redaction()
     return app

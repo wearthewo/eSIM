@@ -67,8 +67,11 @@ def clean_db(db_engine: Engine) -> None:
 def make_app(
     clean_db: None, web_settings: Settings, web_sessions: sessionmaker[Session]
 ) -> Callable[..., FastAPI]:
-    def _make(settings: Settings | None = None) -> FastAPI:
-        return create_app(settings or web_settings, sessions=web_sessions)
+    def _make(settings: Settings | None = None, *, run_retention: bool = False) -> FastAPI:
+        # The daily purge is off by default so tests that count audit rows stay exact.
+        return create_app(
+            settings or web_settings, sessions=web_sessions, run_retention=run_retention
+        )
 
     return _make
 

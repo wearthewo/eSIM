@@ -214,10 +214,29 @@
     }
   });
 
+  // Copy buttons (one-time links on the admin and team pages):
+  // <button data-copy-target="field-id"> copies that field's value.
+  document.addEventListener("click", function (event) {
+    var button = event.target instanceof Element ? event.target.closest("[data-copy-target]") : null;
+    if (!button) return;
+    var field = byId(button.dataset.copyTarget);
+    if (!field) return;
+    field.select();
+    function manual() { button.textContent = "Press Ctrl+C to copy"; }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(field.value).then(function () {
+        button.textContent = "Copied";
+      }, manual);
+    } else {
+      manual();
+    }
+  });
+
   // A page restored from the back/forward cache must not show a stale state.
   window.addEventListener("pageshow", function () {
-    if (!run) {
-      byId("progress").hidden = true;
+    var progress = byId("progress");
+    if (!run && progress) {
+      progress.hidden = true;
       lockInputs(false);
     }
   });
