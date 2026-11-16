@@ -25,6 +25,7 @@ tests/ fixtures/ (synthetic data only)
 - Do not add dependencies without asking.
 - Nothing may write to disk, including library temp files (openpyxl, Starlette uploads).
 - reportlab, segno and openpyxl are pinned because the code relies on their internals or exact output.
+- Never run git stash, reset, checkout or any command that discards or moves uncommitted changes.
 
 ## Commands
 
@@ -36,3 +37,30 @@ tests/ fixtures/ (synthetic data only)
 ## Definition of done
 
 Tests pass, lint clean, only the requested module changed.
+
+## Phase 2: accounts and database
+
+- Invite-only accounts plus a public "Request access" form; no public sign-up.
+- Organizations with several users (roles: owner, member) and a super-admin (me).
+- The database stores metadata only: accounts, sessions, invites, access requests,
+  branding, batches, HMAC fingerprints of codes, audit log, usage. NEVER activation codes,
+  matching IDs, confirmation codes, uploaded files, PDFs, customer names or customer emails.
+- Fingerprints are HMAC-SHA256 with FINGERPRINT_KEY, never plain hashes.
+- Secrets come from environment variables (.env locally), never from code or git.
+- app/core stays free of database and web imports.
+- Audit log keeps 90 days; access requests 30 days.
+- Daily quota default: 20,000 rows per organization.
+- Settings come only from app/settings.py (get_settings()); secrets are Secret objects,
+  read with .reveal() where used. Never log the database URL (use safe_database_url).
+- Schema changes go through an Alembic migration (migrations/); `alembic check` and
+  tests/db/test_migrations.py must report no difference between models and migrations.
+- branding.logo_png is always PNG (the database checks the PNG signature). Store the
+  downscaled logo as a PNG file. Today prepare_branding (app/core/render.py) does not
+  produce one: it encodes PDF image streams (PNG pixel data or JPEG), and uploads may be
+  JPEG. The branding step needs a core helper that returns a downscaled PNG.
+- Every route that takes an ID (batch, user, invite, access request) must check it
+  belongs to the current user's organization (or the user is superadmin). Return 404,
+  not 403, for other organizations' IDs.
+- Batches are never deleted in normal use. Fingerprint retention will be decided in the
+  duplicate-detection step (today fingerprints are deleted with their batch).
+- IDs in URLs. Sequential bigint IDs are fine, but the login step must check every request that takes an ID (batch, user, invite) against the user’s organization, so nobody can see another company’s data by changing /batches/41 to /batches/42

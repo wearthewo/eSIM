@@ -41,6 +41,57 @@ Always use the project venv, never the `python` on PATH.
 .venv\Scripts\python.exe -m uvicorn app.web.main:app --reload
 ```
 
+## Database (local development)
+
+Phase 2 (accounts, organizations, quotas) uses PostgreSQL 14 or newer. The
+database stores metadata only: never activation codes, matching IDs,
+confirmation codes, uploaded files, PDFs, customer names or customer emails.
+
+1. Create the role and the two databases (as a PostgreSQL superuser, e.g. in
+   `psql -U postgres`). Pick your own password:
+
+   ```sql
+   CREATE ROLE esim LOGIN PASSWORD 'change-me';
+   CREATE DATABASE esim OWNER esim;
+   CREATE DATABASE esim_test OWNER esim;
+   ```
+
+2. Create `.env` in the project root (it is gitignored; never commit it):
+
+   ```
+   ENV=development
+   DATABASE_URL=postgresql+psycopg://esim:change-me@localhost:5432/esim
+   TEST_DATABASE_URL=postgresql+psycopg://esim:change-me@localhost:5432/esim_test
+   SECRET_KEY=dev-replace-with-a-long-random-value
+   FINGERPRINT_KEY=dev-replace-with-a-long-random-value
+   ```
+
+   Generate real keys with
+   `.venv\Scripts\python.exe -c "import secrets; print(secrets.token_urlsafe(48))"`.
+   Real environment variables override `.env`, and `.env` is not read at all
+   when `ENV=production`. In production, `SECRET_KEY` and `FINGERPRINT_KEY` must
+   be at least 32 characters and must not start with `dev-`, or the settings
+   refuse to load. `postgres://` and `postgresql://` URLs (as Render provides
+   them) are rewritten to `postgresql+psycopg://` automatically.
+   Changing `FINGERPRINT_KEY` later makes every stored fingerprint useless.
+
+3. Apply the migrations (they read `DATABASE_URL`; nothing is configured in
+   `alembic.ini`):
+
+   ```
+   .venv\Scripts\python.exe -m alembic upgrade head
+   ```
+
+   Undo everything with `-m alembic downgrade base`. After changing
+   `app/db/models.py`, create a migration with
+   `-m alembic revision --autogenerate -m "describe the change"`, review it, and
+   check with `-m alembic check`.
+
+Tests use `TEST_DATABASE_URL`: the schema is rebuilt with Alembic once per run
+and every test is rolled back. If `TEST_DATABASE_URL` is not set, the database
+tests are skipped and all other tests still run. Tests refuse to run if it
+points at the same database as `DATABASE_URL`.
+
 Scripts (synthetic data only, output goes to the gitignored `output/`):
 
 - `scripts/bench.py --rows 10000 [--names same|pool|unique]`: time the full pipeline.

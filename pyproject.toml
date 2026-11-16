@@ -25,6 +25,12 @@ dependencies = [
     # a temporary file. Re-check sheets.py and its tests before bumping.
     "openpyxl>=3.1,<3.2",
     "defusedxml",
+    # Phase 2: database (metadata only, see CLAUDE.md), migrations, password hashing.
+    "sqlalchemy>=2.1,<2.2",
+    "alembic>=1.20,<1.21",
+    "psycopg[binary]>=3.3,<3.4",
+    "argon2-cffi>=25.1,<25.2",
+    "python-dotenv>=1.2,<1.3",
 ]
 
 [project.optional-dependencies]
@@ -49,4 +55,4 @@ extend-exclude = ["app/web/static"]
 select = ["E", "F", "I", "B", "UP", "S", "T20"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101"]
+"tests/**" = ["S101", "S105", "S106"]  # asserts; hard-coded synthetic test secrets
