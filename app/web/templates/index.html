@@ -1,9 +1,55 @@
 {% extends "base.html" %}
 {% block content %}
 <h1>eSIM PDF generator</h1>
-<form hx-post="/upload" hx-encoding="multipart/form-data" hx-target="#results">
-  <input type="file" name="file" accept=".csv,.xlsx" required>
-  <button type="submit">Generate</button>
+<p>
+  Upload a CSV or XLSX file of eSIM activation codes (up to {{ max_rows }} rows,
+  {{ max_upload_mb }} MB). Each row becomes a branded PDF with a QR code, and you
+  download them all as one ZIP file.
+</p>
+<p class="notice">
+  Files are processed in memory and never stored. Nothing you upload is saved,
+  logged or kept after the response is sent.
+</p>
+
+<form id="generate-form" action="/generate" method="post" enctype="multipart/form-data">
+  <fieldset>
+    <legend>Data file</legend>
+    <label for="file">CSV or XLSX file (max {{ max_upload_mb }} MB)</label>
+    <input id="file" type="file" name="file" accept=".csv,.xlsx" required
+           hx-post="/validate" hx-trigger="change" hx-params="file"
+           hx-encoding="multipart/form-data" hx-target="#results"
+           hx-indicator="#checking"
+           data-max-bytes="{{ max_upload_bytes }}"
+           data-too-large="The data file is larger than {{ max_upload_mb }} MB.">
+    <span id="checking" class="htmx-indicator" role="status">Checking file&hellip;</span>
+  </fieldset>
+
+  <fieldset>
+    <legend>Branding</legend>
+    <label for="company_name">Company name</label>
+    <input id="company_name" type="text" name="company_name" required
+           maxlength="{{ max_company_chars }}" value="{{ form.company_name }}">
+
+    <label for="primary_color">Primary colour</label>
+    <input id="primary_color" type="color" name="primary_color" value="{{ form.primary_color }}">
+
+    <label for="logo">Logo (optional, PNG or JPEG, max {{ max_logo_kb }} KB)</label>
+    <input id="logo" type="file" name="logo" accept="image/png,image/jpeg"
+           data-max-bytes="{{ max_logo_bytes }}"
+           data-too-large="The logo is larger than {{ max_logo_kb }} KB.">
+
+    <label for="footer_text">Footer text (optional)</label>
+    <input id="footer_text" type="text" name="footer_text"
+           maxlength="{{ max_footer_chars }}" value="{{ form.footer_text }}">
+  </fieldset>
+
+  <input type="hidden" name="download_token" value="">
+
+  <div id="results" aria-live="polite">
+    {% if error or results %}{% include "_results.html" %}{% endif %}
+  </div>
+  <p id="generating" role="status" hidden>
+    Generating, this can take up to 30 seconds for 500 rows&hellip;
+  </p>
 </form>
-<div id="results"></div>
 {% endblock %}

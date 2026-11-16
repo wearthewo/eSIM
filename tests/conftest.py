@@ -159,7 +159,11 @@ def corrupt_xlsx() -> bytes:
     return b"PK\x03\x04 this is not really a zip archive \x00\xff\xfe"
 
 
+OVERSIZE_CAP_BYTES = 5 * 1024 * 1024  # app.web.routes.MAX_UPLOAD_BYTES (asserted in tests/web)
+
+
 @pytest.fixture
 def oversize_upload() -> bytes:
-    """Payload just over the 5 MB upload cap."""
-    raise NotImplementedError
+    """Payload just over the 5 MB upload cap: a valid CSV start, padded to cap + 1 bytes."""
+    head = synthetic_csv(1)
+    return head + b"#" * (OVERSIZE_CAP_BYTES + 1 - len(head))

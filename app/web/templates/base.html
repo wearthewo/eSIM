@@ -3,8 +3,13 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  {# htmx: no injected <style> (CSP), no eval, no scripts from responses, no history
+     snapshots in localStorage, and swap 4xx/5xx responses so error messages show. #}
+  <meta name="htmx-config" content='{"includeIndicatorStyles": false, "allowEval": false, "allowScriptTags": false, "historyEnabled": false, "historyCacheSize": 0, "responseHandling": [{"code": "204", "swap": false}, {"code": "...", "swap": true}]}'>
   <title>{% block title %}eSIM PDF generator{% endblock %}</title>
+  <link rel="stylesheet" href="/static/app.css">
   <script src="/static/htmx.min.js" defer></script>
+  <script src="/static/app.js" defer></script>
 </head>
 <body>
   <main>
