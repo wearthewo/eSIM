@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import base64
 import re
+import struct
 import zlib
 
 import pytest
+import segno
 from reportlab.lib.units import cm
 from reportlab.pdfbase import pdfmetrics
 
@@ -50,6 +52,8 @@ CONFIRMATION_NOTE = "A confirmation code will be sent separately."
 
 _OBJ = re.compile(rb"(\d+) 0 obj(.*?)endobj", re.DOTALL)
 _STREAM = re.compile(rb"stream\r?\n(.*?)\r?\n?endstream", re.DOTALL)
+_STREAM_START = re.compile(rb"stream\r?\n")
+_LENGTH = re.compile(rb"/Length (\d+)\b")
 _FILTERS = re.compile(rb"/Filter\s*(\[[^\]]*\]|/\w+)")
 _TEXT_TOKEN = re.compile(rb"/([^\s/\[\]<>()]+)\s+[\d.]+\s+Tf|\(((?:\\.|[^\\)])*)\)", re.DOTALL)
 _BFCHAR = re.compile(rb"<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>")
@@ -77,8 +81,11 @@ def _objects(pdf: bytes) -> dict[int, tuple[bytes, bytes | None]]:
         stream_match = _STREAM.search(body)
         stream = None
         if stream_match:
-            stream = stream_match.group(1)
             head = body[: stream_match.start()]
+            # Streams are binary (Flate only): slice by /Length, not by delimiters.
+            length = _LENGTH.search(head)
+            start = _STREAM_START.match(body, stream_match.start()).end()
+            stream = body[start : start + int(length.group(1))] if length else stream_match.group(1)
             stream = _decode_stream(head, stream)
             body = head
         out[int(match.group(1))] = (body, stream)
@@ -153,6 +160,33 @@ def image_draws(pdf: bytes) -> list[tuple[float, float]]:
     content = decompressed(pdf)
     draws = re.findall(rb"([\d.]+) 0 0 ([\d.]+) [\d.-]+ [\d.-]+ cm\s*/(\S+) Do", content)
     return [(float(w), float(h)) for w, h, _ in draws]
+
+
+_QR_PATH = re.compile(
+    rb"([\d.]+) 0 0 ([\d.]+) [\d.-]+ [\d.-]+ cm\s+0 0 0 rg\s+((?:\d+ \d+ \d+ 1 re\s+)+)f\b"
+)
+
+
+def qr_drawings(pdf: bytes) -> list[tuple[float, tuple[bytes, ...]]]:
+    """Every vector QR on the page: (box side in points, module matrix without quiet zone).
+
+    The QR is one filled path of 1-module-high rectangles in module units,
+    drawn under a uniform ``module 0 0 module x y cm`` transform.
+    """
+    found = []
+    for sx, sy, rects in _QR_PATH.findall(decompressed(pdf)):
+        assert sx == sy  # square modules
+        module = float(sx)
+        total = round(render.QR_SIZE / module)  # modules including the quiet zone
+        size = total - 2 * render.QR_BORDER
+        grid = [bytearray(size) for _ in range(size)]
+        for x, y, w in re.findall(rb"(\d+) (\d+) (\d+) 1 re", rects):
+            row = size - 1 - (int(y) - render.QR_BORDER)
+            col = int(x) - render.QR_BORDER
+            for j in range(col, col + int(w)):
+                grid[row][j] = 1
+        found.append((module * total, tuple(bytes(r) for r in grid)))
+    return found
 
 
 # --- fixtures -------------------------------------------------------------------
@@ -242,22 +276,31 @@ def test_render_pdf_without_optional_fields() -> None:
     assert page_count(data) == 1
 
 
-def test_render_pdf_qr_is_at_least_4cm(pdf) -> None:
-    (width, height) = image_draws(pdf)[0]  # no logo, so the only image is the QR
-    assert len(image_draws(pdf)) == 1
-    assert width >= 4 * cm
-    assert height == pytest.approx(width)
+def test_render_pdf_qr_is_vector_and_at_least_4cm(pdf) -> None:
+    assert image_draws(pdf) == []  # no logo, and the QR is not an image
+    [(side, _matrix)] = qr_drawings(pdf)
+    assert side >= 4 * cm
+    assert side == pytest.approx(render.QR_SIZE)
+
+
+@pytest.mark.parametrize("record", [RECORD, RECORD_WITH_CONFIRMATION], ids=["plain", "confirm"])
+def test_render_pdf_qr_encodes_exactly_the_activation_code(record) -> None:
+    # Decode the drawn modules and compare with segno's own encoding of the
+    # activation code alone (level M, no error boost).
+    [(_side, matrix)] = qr_drawings(render.render_pdf(record, BRANDING))
+    reference = segno.make_qr(ACTIVATION, error="m", boost_error=False)
+    assert matrix == tuple(bytes(row) for row in reference.matrix)
 
 
 def test_render_pdf_qr_payload_is_activation_code_only(monkeypatch) -> None:
     calls: list[str] = []
-    real = qr.make_qr_png
+    real = qr.make_qr_matrix
 
-    def spy(payload: str, **kwargs) -> bytes:
+    def spy(payload: str) -> tuple[bytes, ...]:
         calls.append(payload)
-        return real(payload, **kwargs)
+        return real(payload)
 
-    monkeypatch.setattr(qr, "make_qr_png", spy)
+    monkeypatch.setattr(qr, "make_qr_matrix", spy)
     render.render_pdf(RECORD_WITH_CONFIRMATION, BRANDING)
     assert calls == [ACTIVATION]
     assert CONFIRMATION not in calls[0]
@@ -267,16 +310,61 @@ def test_render_pdf_with_logo() -> None:
     logo = qr.make_qr_png("logo", scale=4)  # any valid PNG
     branding = Branding(company_name="Example Telecom (test)", logo_png=logo)
     data = render.render_pdf(RECORD, branding)
-    draws = image_draws(data)
-    assert len(draws) == 2
-    assert max(w for w, _ in draws) >= 4 * cm
+    [(width, height)] = image_draws(data)
+    assert 0 < width <= render.LOGO_MAX_WIDTH
+    assert 0 < height <= render.LOGO_MAX_HEIGHT
+    assert len(qr_drawings(data)) == 1
+
+
+def _rgba_png(width: int, height: int) -> bytes:
+    """Minimal RGBA PNG: opaque blue box on a transparent background."""
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        crc = struct.pack(">I", zlib.crc32(kind + data))
+        return struct.pack(">I", len(data)) + kind + data + crc
+
+    rows = b"".join(
+        b"\x00"
+        + b"".join(
+            bytes((26, 115, 232, 255 if 2 <= x < width - 2 and 2 <= y < height - 2 else 0))
+            for x in range(width)
+        )
+        for y in range(height)
+    )
+    header = struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", header)
+        + chunk(b"IDAT", zlib.compress(rows))
+        + chunk(b"IEND", b"")
+    )
+
+
+def test_render_pdf_transparent_logo_keeps_soft_mask() -> None:
+    # Same alpha handling as Canvas.drawImage(mask="auto"): the alpha channel becomes an /SMask.
+    branding = Branding(company_name="Example Telecom (test)", logo_png=_rgba_png(40, 20))
+    data = render.render_pdf(RECORD, branding)
+    assert len(image_draws(data)) == 1
+    assert b"/SMask" in decompressed(data)
+
+
+def test_prepared_branding_is_reused_across_pdfs() -> None:
+    logo = qr.make_qr_png("logo", scale=4)
+    branding = Branding(company_name="Example Telecom (test)", logo_png=logo, footer_text="x")
+    prepared = render.prepare_branding(branding)
+    first = render.render_pdf(RECORD, prepared)
+    second = render.render_pdf(RECORD_WITH_CONFIRMATION, prepared)
+    again = render.render_pdf(RECORD, prepared)
+    assert first == again == render.render_pdf(RECORD, branding)
+    for data in (first, second):
+        assert len(image_draws(data)) == 1
 
 
 def test_render_pdf_invalid_logo_is_skipped() -> None:
     branding = Branding(company_name="Example Telecom (test)", logo_png=b"not a png")
     data = render.render_pdf(RECORD, branding)
     assert page_count(data) == 1
-    assert len(image_draws(data)) == 1
+    assert image_draws(data) == []
 
 
 # --- secrets never printed -------------------------------------------------------

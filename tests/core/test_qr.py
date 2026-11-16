@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import io
+import random
 
+import pytest
 import segno
 
 from app.core import qr
@@ -93,6 +95,92 @@ def test_error_correction_level_is_m(monkeypatch) -> None:
     qr.make_qr_svg(PAYLOAD)
     assert [code.error for code in spy.codes] == ["M", "M"]
     assert all(code.is_micro is False for code in spy.codes)
+
+
+# --- module matrix (used by the PDF renderer) ---------------------------------------
+
+
+def _reference_matrix(payload: str) -> tuple[bytes, ...]:
+    code = segno.make_qr(payload, error="m", boost_error=False)
+    return tuple(bytes(row) for row in code.matrix)
+
+
+def test_make_qr_matrix_shape_and_values() -> None:
+    matrix = qr.make_qr_matrix(PAYLOAD)
+    assert all(isinstance(row, bytes) and len(row) == len(matrix) for row in matrix)
+    assert {b for row in matrix for b in row} == {0, 1}
+
+
+def test_make_qr_matrix_matches_segno() -> None:
+    assert qr.make_qr_matrix(PAYLOAD) == _reference_matrix(PAYLOAD)
+
+
+def test_make_qr_matrix_matches_segno_for_many_payloads() -> None:
+    # Exercises most mask choices and versions 1-19 (alignment and version areas).
+    rng = random.Random(20240501)  # noqa: S311 (test data, not crypto)
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789$-.:abcxyz"
+    payloads = [f"LPA:1$smdp.example.invalid$TEST-{i:04d}-AAAA-BBBB" for i in range(40)]
+    payloads += ["".join(rng.choice(alphabet) for _ in range(n)) for n in range(1, 160, 3)]
+    payloads += ["".join(rng.choice(alphabet) for _ in range(n)) for n in (250, 400, 600)]
+    masks, versions = set(), set()
+    for payload in payloads:
+        reference = segno.make_qr(payload, error="m", boost_error=False)
+        masks.add(reference.mask)
+        versions.add(reference.version)
+        assert qr.make_qr_matrix(payload) == tuple(bytes(r) for r in reference.matrix), payload
+    assert len(masks) >= 6
+    assert min(versions) == 1 and max(versions) >= 7  # 7+ carries version information
+
+
+def test_make_qr_matrix_payload_and_error_level(monkeypatch) -> None:
+    spy = _spy(monkeypatch)
+    qr.make_qr_matrix(PAYLOAD)
+    assert spy.payloads == [PAYLOAD]
+    assert CONFIRMATION not in spy.payloads[0]
+    assert [code.error for code in spy.codes] == ["M"]
+    assert spy.codes[0].is_micro is False
+
+
+def _segno_n3(line: str) -> int:
+    """N3 for one line, written the way segno's mask_scores counts it."""
+    size, count, idx = len(line), 0, line.find("1011101")
+    while idx != -1:
+        offset = idx + 7
+        if (
+            idx in (0, size - 7)
+            or "1" not in line[max(idx - 4, 0) : idx]
+            or "1" not in line[offset : offset + 4]
+        ):
+            count += 40
+        else:
+            offset = idx + 4
+        idx = line.find("1011101", offset)
+    return count
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "1011101",
+        "00001011101",
+        "10111010000",
+        "1111011101111",
+        "000010111011101",  # overlap 4 apart: first counted, second skipped
+        "1011101110111010000",  # overlap 4 apart: first not counted, second counted
+        "0000101110101110100000",  # overlap 6 apart
+        "10111011011101",
+    ],
+)
+def test_n3_penalty_matches_segno_rules(line) -> None:
+    assert qr._n3_penalty(int(line, 2)) == _segno_n3(line)
+
+
+def test_n3_penalty_matches_segno_rules_random() -> None:
+    rng = random.Random(7)  # noqa: S311 (test data, not crypto)
+    pieces = ["1011101", "0000", "1", "0", "11", "01"]
+    for _ in range(2000):
+        line = "".join(rng.choice(pieces) for _ in range(rng.randint(1, 12)))
+        assert qr._n3_penalty(int(line, 2)) == _segno_n3(line), line
 
 
 def test_output_matches_reference_encoding_of_payload_only() -> None:

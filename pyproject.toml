@@ -12,8 +12,13 @@ dependencies = [
     "uvicorn[standard]",
     "jinja2",
     "python-multipart",
-    "segno",
-    "reportlab",
+    # Pinned to the minor version: app/core/qr.py make_qr_matrix reproduces segno's
+    # mask selection and is parity-tested against it (tests/core/test_qr.py).
+    "segno>=1.6,<1.7",
+    # Pinned to the minor version: app/core/render.py relies on ReportLab internals
+    # (mirrors TTFont.addObjects, registers prepared image XObjects via canvas._doc,
+    # sets rl_config.useA85). Re-check render.py and its tests before bumping.
+    "reportlab>=5.1,<5.2",
     "openpyxl",
     "defusedxml",
 ]
