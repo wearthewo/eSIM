@@ -54,6 +54,8 @@
            maxlength="{{ max_footer_chars }}" value="{{ form.footer_text }}">
   </fieldset>
 
+  {# app.js sends this as the X-CSRF-Token header with every part request. #}
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
   {# Filled in by app.js: the local date and time for the ZIP name, and which part to build. #}
   <input type="hidden" name="client_stamp" value="">
   <input type="hidden" name="part" value="1">

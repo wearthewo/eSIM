@@ -12,6 +12,13 @@ tr.error td { color: #a40000; font-weight: normal; }
 tr.warning td { color: #7a5200; }
 button { font-size: 1rem; padding: 0.5rem 1rem; }
 
+.site-header { display: flex; justify-content: flex-end; align-items: center; gap: 1rem;
+  padding: 0.5rem 1rem; border-bottom: 1px solid #ccc; }
+.site-header .logout { margin: 0; }
+.site-header button { font-size: 0.9rem; padding: 0.25rem 0.75rem; }
+.auth-form input[type="email"], .auth-form input[type="password"] {
+  width: 100%; max-width: 30rem; box-sizing: border-box; }
+
 /* htmx's injected indicator styles are disabled (CSP), so they live here. */
 .htmx-indicator { display: none; }
 .htmx-request .htmx-indicator, .htmx-request.htmx-indicator { display: inline; }

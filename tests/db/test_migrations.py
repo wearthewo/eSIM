@@ -16,6 +16,7 @@ TABLES = {
     "organizations",
     "users",
     "invites",
+    "password_tokens",
     "sessions",
     "access_requests",
     "branding",

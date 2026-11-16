@@ -49,6 +49,8 @@ Tests pass, lint clean, only the requested module changed.
 - Secrets come from environment variables (.env locally), never from code or git.
 - app/core stays free of database and web imports.
 - Audit log keeps 90 days; access requests 30 days.
+- On Render, uvicorn must run with --proxy-headers and --forwarded-allow-ips, otherwise all
+  users share one IP prefix.
 - Daily quota default: 20,000 rows per organization.
 - Settings come only from app/settings.py (get_settings()); secrets are Secret objects,
   read with .reveal() where used. Never log the database URL (use safe_database_url).
@@ -64,3 +66,4 @@ Tests pass, lint clean, only the requested module changed.
 - Batches are never deleted in normal use. Fingerprint retention will be decided in the
   duplicate-detection step (today fingerprints are deleted with their batch).
 - IDs in URLs. Sequential bigint IDs are fine, but the login step must check every request that takes an ID (batch, user, invite) against the user’s organization, so nobody can see another company’s data by changing /batches/41 to /batches/42
+- Never set the sqlalchemy loggers to DEBUG in production (they print row data, including emails).

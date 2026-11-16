@@ -104,8 +104,14 @@
       method: "POST",
       body: current.data,
       credentials: "same-origin",
+      headers: { "X-CSRF-Token": String(current.data.get("csrf_token") || "") },
       signal: current.controller.signal
     }).then(function (response) {
+      // Logged out meanwhile (session expired): the server redirected to the login page.
+      if (response.status === 401 || response.redirected) {
+        window.location.assign("/login");
+        throw { loggedOut: true };
+      }
       if (!response.ok) {
         return readFailure(response).then(function (failure) { throw failure; });
       }
@@ -128,6 +134,10 @@
     }).catch(function (reason) {
       if (run !== current) return;
       current.controller = null;
+      if (reason && reason.loggedOut) {
+        run = null;
+        return;
+      }
       var n = current.next;
       if (reason && reason.name === "AbortError") {
         setProgress(false, "Cancelled before " + partOf(current) + " was downloaded." +

@@ -11,7 +11,17 @@
   <script src="/static/htmx.min.js" defer></script>
   <script src="/static/app.js" defer></script>
 </head>
-<body>
+{# Logged in: every htmx request carries the session's CSRF token as a header. #}
+<body{% if csrf_token %} hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'{% endif %}>
+  {% if current_user %}
+  <header class="site-header">
+    <span class="who">{{ current_user.email }}</span>
+    <form method="post" action="/logout" class="logout">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit">Log out</button>
+    </form>
+  </header>
+  {% endif %}
   <main>
     {% block content %}{% endblock %}
   </main>

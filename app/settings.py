@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
 from sqlalchemy.engine import make_url
 
@@ -29,6 +30,7 @@ MIN_SECRET_CHARS = 32
 DEV_SECRET_PREFIX = "dev-"  # noqa: S105  (a prefix to reject, not a secret)
 DRIVER_SCHEME = "postgresql+psycopg://"
 _REWRITE_SCHEMES = ("postgresql://", "postgres://")
+DEFAULT_PUBLIC_BASE_URL = "http://127.0.0.1:8000"
 _MASK = "**********"
 
 
@@ -95,10 +97,17 @@ class Settings:
     test_database_url: Secret | None = None
     secret_key: Secret | None = None
     fingerprint_key: Secret | None = None
+    # Where users reach the app; the admin CLI builds invite and reset links from it.
+    public_base_url: str = DEFAULT_PUBLIC_BASE_URL
 
     @property
     def is_production(self) -> bool:
         return self.env == "production"
+
+    @property
+    def cookie_secure(self) -> bool:
+        """``Secure`` + ``__Host-`` cookies. Off in development, which runs on plain http."""
+        return self.is_production
 
     @property
     def safe_database_url(self) -> str | None:
@@ -134,6 +143,17 @@ def _secret_problem(name: str, value: Secret | None) -> str | None:
     return None
 
 
+def _base_url_problem(value: str | None, *, production: bool) -> str | None:
+    """Production needs an ``https://`` URL; development also accepts ``http://``."""
+    if value is None:
+        return "PUBLIC_BASE_URL is missing" if production else None
+    parts = urlsplit(value)
+    schemes = ("https",) if production else ("http", "https")
+    if parts.scheme not in schemes or not parts.netloc or parts.query or parts.fragment:
+        return f"PUBLIC_BASE_URL must be an {' or '.join(schemes)} URL"
+    return None
+
+
 def load_settings(environ: Mapping[str, str]) -> Settings:
     """Build ``Settings`` from ``environ``. Raises ``SettingsError`` if they are unusable.
 
@@ -142,6 +162,14 @@ def load_settings(environ: Mapping[str, str]) -> Settings:
     env = (_optional(environ, "ENV") or "development").lower()
     if env not in ENVS:
         raise SettingsError(f"ENV must be one of {', '.join(ENVS)}")
+    production = env == "production"
+
+    base_url = _optional(environ, "PUBLIC_BASE_URL")
+    if base_url is not None:
+        base_url = base_url.rstrip("/")
+    base_url_problem = _base_url_problem(base_url, production=production)
+    if base_url_problem is not None and not production:
+        raise SettingsError(base_url_problem)
 
     settings = Settings(
         env=env,  # type: ignore[arg-type]  # checked against ENVS above
@@ -149,21 +177,38 @@ def load_settings(environ: Mapping[str, str]) -> Settings:
         test_database_url=_url(environ, "TEST_DATABASE_URL"),
         secret_key=_secret(environ, "SECRET_KEY"),
         fingerprint_key=_secret(environ, "FINGERPRINT_KEY"),
+        public_base_url=base_url or DEFAULT_PUBLIC_BASE_URL,
     )
 
-    if settings.is_production:
+    if production:
         problems = [
             p
             for p in (
                 _secret_problem("SECRET_KEY", settings.secret_key),
                 _secret_problem("FINGERPRINT_KEY", settings.fingerprint_key),
                 "DATABASE_URL is missing" if settings.database_url is None else None,
+                base_url_problem,
             )
             if p is not None
         ]
         if problems:
             raise SettingsError("Refusing to start in production: " + "; ".join(problems))
     return settings
+
+
+def check_web_settings(settings: Settings) -> None:
+    """Raise ``SettingsError`` unless the web app can run: it needs the database and a
+    ``SECRET_KEY`` in every environment (production strength is checked by ``load_settings``)."""
+    problems = [
+        p
+        for p in (
+            "DATABASE_URL is missing" if settings.database_url is None else None,
+            "SECRET_KEY is missing" if settings.secret_key is None else None,
+        )
+        if p is not None
+    ]
+    if problems:
+        raise SettingsError("Refusing to start: " + "; ".join(problems))
 
 
 @lru_cache(maxsize=1)

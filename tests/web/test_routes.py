@@ -10,7 +10,6 @@ import tempfile
 import threading
 import zipfile
 import zlib
-from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -25,7 +24,8 @@ from PIL import Image
 from app.core import parser, pipeline, sheets, zipper
 from app.core.models import Branding
 from app.web import routes
-from app.web.main import SECURITY_HEADERS, create_app
+from app.web.auth import CSRF_HEADER, SESSION_COOKIE
+from app.web.main import SECURITY_HEADERS
 from tests.conftest import (
     FIXTURES_DIR,
     OVERSIZE_CAP_BYTES,
@@ -36,6 +36,7 @@ from tests.conftest import (
 )
 from tests.core.test_email import MISSING_EMAIL_MESSAGE
 from tests.core.test_email import _valid_fixture as valid_emails_csv
+from tests.web.conftest import LoggedIn
 
 FORM = {
     "company_name": "Example Telecom (test)",
@@ -46,12 +47,6 @@ VALID_MINIMAL_ICCIDS = ["8999000000000000013", "8999000000000000021", "899900000
 SECRET_COLUMNS = ("activation_code", "matching_id", "confirmation_code")
 CHUNK = 64 * 1024
 BOUNDARY = "test-boundary-7d3a"
-
-
-@pytest.fixture
-def client() -> Iterator[TestClient]:
-    with TestClient(create_app()) as c:
-        yield c
 
 
 def _image(fmt: str, size: tuple[int, int] = (8, 4), **save: object) -> bytes:
@@ -114,9 +109,9 @@ def _multipart(*parts: tuple[str, str | None, bytes]) -> bytes:
 
 
 def _asgi_post(
-    path: str, body: bytes, content_length: int | None = None
+    user: LoggedIn, path: str, body: bytes, content_length: int | None = None
 ) -> tuple[int, dict[str, str], bytes, int, int]:
-    """POST ``body`` in 64 KB chunks without buffering it first.
+    """POST ``body`` in 64 KB chunks without buffering it first, logged in as ``user``.
 
     Returns ``(status, headers, response_body, chunks_read, chunks_total)``.
     ``content_length=None`` sends no Content-Length (like a chunked upload).
@@ -140,7 +135,11 @@ def _asgi_post(
     async def send(message: dict) -> None:
         sent.append(message)
 
-    headers = [(b"content-type", f"multipart/form-data; boundary={BOUNDARY}".encode())]
+    headers = [
+        (b"content-type", f"multipart/form-data; boundary={BOUNDARY}".encode()),
+        (b"cookie", f"{SESSION_COOKIE}={user.token}".encode()),
+        (CSRF_HEADER.lower().encode(), user.csrf.encode()),
+    ]
     if content_length is not None:
         headers.append((b"content-length", str(content_length).encode()))
     scope = {
@@ -157,7 +156,7 @@ def _asgi_post(
         "client": ("127.0.0.1", 50000),
         "server": ("testserver", 80),
     }
-    asyncio.run(create_app()(scope, receive, send))
+    asyncio.run(user.app(scope, receive, send))
     start = next(m for m in sent if m["type"] == "http.response.start")
     response_headers = {k.decode(): v.decode() for k, v in start["headers"]}
     response_body = b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body")
@@ -167,8 +166,8 @@ def _asgi_post(
 # --- App, index, headers ------------------------------------------------------------
 
 
-def test_app_debug_off() -> None:
-    assert create_app().debug is False
+def test_app_debug_off(web_app) -> None:
+    assert web_app.debug is False
 
 
 def test_oversize_fixture_matches_cap(oversize_upload: bytes) -> None:
@@ -261,8 +260,8 @@ def test_security_headers_on_every_response(client: TestClient, path: str) -> No
     _assert_security_headers(client.get(path))
 
 
-def test_unhandled_error_is_generic_with_headers() -> None:
-    app = create_app()
+def test_unhandled_error_is_generic_with_headers(web_app) -> None:
+    app = web_app
 
     @app.get("/boom")
     async def boom() -> None:
@@ -504,22 +503,25 @@ def test_generate_with_logo(client: TestClient, fixture_bytes, fmt: str, name: s
     assert b"/Subtype /Image" in _first_pdf(response)
 
 
-def test_generate_without_logo_uses_default(fixture_bytes) -> None:
+def test_generate_without_logo_uses_default(logged_in: LoggedIn, fixture_bytes) -> None:
     body = _multipart(
         *[(k, None, v.encode()) for k, v in FORM.items()],
         ("file", "v.csv", fixture_bytes("valid_minimal.csv")),
         ("logo", "", b""),  # what a browser sends when no logo is chosen
     )
-    status, headers, response, _, _ = _asgi_post("/generate", body, content_length=len(body))
+    status, headers, response, _, _ = _asgi_post(
+        logged_in, "/generate", body, content_length=len(body)
+    )
     assert status == 200 and headers["content-type"] == "application/zip"
     with zipfile.ZipFile(io.BytesIO(response)) as zf:
         assert b"/Subtype /Image" in zf.read("esim_8999000000000000013.pdf")
 
 
-def test_generate_branding_override() -> None:
-    app = create_app()
-    app.dependency_overrides[routes.get_branding] = lambda: Branding(company_name="Default (test)")
-    response = TestClient(app).post(
+def test_generate_branding_override(logged_in: LoggedIn) -> None:
+    logged_in.app.dependency_overrides[routes.get_branding] = lambda: Branding(
+        company_name="Default (test)"
+    )
+    response = logged_in.client().post(
         "/generate",
         data=FORM,
         files=_csv_file("v.csv", (FIXTURES_DIR / "valid_minimal.csv").read_bytes()),
@@ -655,9 +657,11 @@ def test_oversize_logo_413(client: TestClient, fixture_bytes) -> None:
 
 
 @pytest.mark.parametrize("path", ["/validate", "/generate"])
-def test_oversize_file_stops_reading_early(oversize_upload: bytes, path: str) -> None:
+def test_oversize_file_stops_reading_early(
+    logged_in: LoggedIn, oversize_upload: bytes, path: str
+) -> None:
     body = _multipart(("company_name", None, b"Test"), ("file", "big.csv", oversize_upload * 2))
-    status, headers, response, read, total = _asgi_post(path, body)
+    status, headers, response, read, total = _asgi_post(logged_in, path, body)
     assert status == 413
     assert routes.MSG_TOO_LARGE[routes.DATA_FIELD].encode() in response
     # Stopped right after crossing the 5 MB cap: one chunk past it, at most.
@@ -665,57 +669,57 @@ def test_oversize_file_stops_reading_early(oversize_upload: bytes, path: str) ->
     assert read < total
 
 
-def test_oversize_logo_stops_reading_early(fixture_bytes) -> None:
+def test_oversize_logo_stops_reading_early(logged_in: LoggedIn, fixture_bytes) -> None:
     logo = _image("PNG") + b"\x00" * (4 * 1024 * 1024)
     body = _multipart(
         *[(k, None, v.encode()) for k, v in FORM.items()],
         ("file", "v.csv", fixture_bytes("valid_minimal.csv")),
         ("logo", "logo.png", logo),
     )
-    status, _, response, read, total = _asgi_post("/generate", body)
+    status, _, response, read, total = _asgi_post(logged_in, "/generate", body)
     assert status == 413
     assert routes.MSG_TOO_LARGE[routes.LOGO_FIELD].encode() in response
     assert read * CHUNK <= routes.MAX_LOGO_BYTES + 2 * CHUNK
     assert read < total
 
 
-def test_declared_content_length_over_limit_reads_nothing() -> None:
+def test_declared_content_length_over_limit_reads_nothing(logged_in: LoggedIn) -> None:
     body = _multipart(("file", "v.csv", b"iccid\n"))
     status, headers, response, read, _ = _asgi_post(
-        "/validate", body, content_length=routes.MAX_BODY_BYTES + 1
+        logged_in, "/validate", body, content_length=routes.MAX_BODY_BYTES + 1
     )
     assert status == 413
     assert read == 0
     assert routes.MSG_BODY_TOO_LARGE.encode() in response
 
 
-def test_unsupported_extension_rejected_before_reading_file() -> None:
+def test_unsupported_extension_rejected_before_reading_file(logged_in: LoggedIn) -> None:
     body = _multipart(("file", "big.txt", b"x" * (3 * 1024 * 1024)))
-    status, _, response, read, total = _asgi_post("/validate", body)
+    status, _, response, read, total = _asgi_post(logged_in, "/validate", body)
     assert status == 400
     assert routes.MSG_UNSUPPORTED.encode() in response
     assert read == 1 < total
 
 
-def test_oversize_text_field_413() -> None:
+def test_oversize_text_field_413(logged_in: LoggedIn) -> None:
     body = _multipart(("company_name", None, b"x" * (routes.MAX_FIELD_BYTES + 1)))
-    status, _, response, _, _ = _asgi_post("/generate", body)
+    status, _, response, _, _ = _asgi_post(logged_in, "/generate", body)
     assert status == 413
     assert routes.MSG_FIELD_TOO_LARGE.encode() in response
 
 
-def test_unknown_file_part_capped_like_text_field() -> None:
+def test_unknown_file_part_capped_like_text_field(logged_in: LoggedIn) -> None:
     body = _multipart(("other", "x.bin", b"x" * (routes.MAX_FIELD_BYTES + 1)))
-    status, _, response, _, _ = _asgi_post("/validate", body)
+    status, _, response, _, _ = _asgi_post(logged_in, "/validate", body)
     assert status == 413 and routes.MSG_FIELD_TOO_LARGE.encode() in response
 
 
-def test_whole_body_cap_without_content_length(fixture_bytes) -> None:
+def test_whole_body_cap_without_content_length(logged_in: LoggedIn, fixture_bytes) -> None:
     # Every part is under its cap, but the epilogue after the closing boundary
     # (skipped by the multipart parser) pushes the body over MAX_BODY_BYTES.
     epilogue = b"x" * (routes.MAX_BODY_BYTES + CHUNK)
     body = _multipart(("file", "v.csv", fixture_bytes("valid_minimal.csv"))) + epilogue
-    status, _, response, read, total = _asgi_post("/validate", body)
+    status, _, response, read, total = _asgi_post(logged_in, "/validate", body)
     assert status == 413
     assert routes.MSG_BODY_TOO_LARGE.encode() in response
     assert read < total
@@ -724,16 +728,16 @@ def test_whole_body_cap_without_content_length(fixture_bytes) -> None:
 # --- Malformed requests ------------------------------------------------------------------
 
 
-def test_too_many_parts_400() -> None:
+def test_too_many_parts_400(logged_in: LoggedIn) -> None:
     body = _multipart(*[(f"f{i}", None, b"x") for i in range(routes.MAX_PARTS + 1)])
-    status, _, response, _, _ = _asgi_post("/validate", body)
+    status, _, response, _, _ = _asgi_post(logged_in, "/validate", body)
     assert status == 400 and routes.MSG_MALFORMED.encode() in response
 
 
-def test_duplicate_field_400(fixture_bytes) -> None:
+def test_duplicate_field_400(logged_in: LoggedIn, fixture_bytes) -> None:
     csv_bytes = fixture_bytes("valid_minimal.csv")
     body = _multipart(("file", "a.csv", csv_bytes), ("file", "b.csv", csv_bytes))
-    status, _, _, _, _ = _asgi_post("/validate", body)
+    status, _, _, _, _ = _asgi_post(logged_in, "/validate", body)
     assert status == 400
 
 
@@ -979,9 +983,15 @@ class _Gate:
         return True
 
 
-def _async_client() -> httpx.AsyncClient:
-    transport = httpx.ASGITransport(app=create_app())
-    return httpx.AsyncClient(transport=transport, base_url="http://testserver", timeout=10)
+def _async_client(user: LoggedIn) -> httpx.AsyncClient:
+    transport = httpx.ASGITransport(app=user.app)
+    return httpx.AsyncClient(
+        transport=transport,
+        base_url="http://testserver",
+        timeout=10,
+        cookies=user.cookies,
+        headers=user.headers,
+    )
 
 
 def _post_generate(client: httpx.AsyncClient, data: bytes):
@@ -991,13 +1001,15 @@ def _post_generate(client: httpx.AsyncClient, data: bytes):
 @pytest.mark.parametrize(
     ("path", "target"), [("/generate", "process_upload"), ("/validate", "check_upload")]
 )
-def test_pipeline_runs_off_the_event_loop(monkeypatch, fixture_bytes, path, target) -> None:
+def test_pipeline_runs_off_the_event_loop(
+    logged_in: LoggedIn, monkeypatch, fixture_bytes, path, target
+) -> None:
     gate = _Gate(getattr(routes, target))
     monkeypatch.setattr(routes, target, gate)
     data = fixture_bytes("valid_minimal.csv")
 
     async def scenario() -> None:
-        async with _async_client() as client:
+        async with _async_client(logged_in) as client:
             job = asyncio.create_task(client.post(path, data=FORM, files=_csv_file("v.csv", data)))
             assert await gate.entered()
             index = await asyncio.wait_for(client.get("/"), 2)
@@ -1009,7 +1021,9 @@ def test_pipeline_runs_off_the_event_loop(monkeypatch, fixture_bytes, path, targ
     asyncio.run(scenario())
 
 
-def test_generate_limited_to_concurrent_jobs(monkeypatch, fixture_bytes) -> None:
+def test_generate_limited_to_concurrent_jobs(
+    logged_in: LoggedIn, monkeypatch, fixture_bytes
+) -> None:
     assert routes.MAX_CONCURRENT_JOBS == 2
     assert routes.JOB_WAIT_SECONDS == 5.0
     monkeypatch.setattr(routes, "JOB_WAIT_SECONDS", 0.2)
@@ -1018,7 +1032,7 @@ def test_generate_limited_to_concurrent_jobs(monkeypatch, fixture_bytes) -> None
     data = fixture_bytes("valid_minimal.csv")
 
     async def scenario() -> None:
-        async with _async_client() as client:
+        async with _async_client(logged_in) as client:
             jobs = [asyncio.create_task(_post_generate(client, data)) for _ in range(2)]
             assert await gate.entered(2)
 
@@ -1038,13 +1052,13 @@ def test_generate_limited_to_concurrent_jobs(monkeypatch, fixture_bytes) -> None
     asyncio.run(scenario())
 
 
-def test_generate_waits_for_a_free_slot(monkeypatch, fixture_bytes) -> None:
+def test_generate_waits_for_a_free_slot(logged_in: LoggedIn, monkeypatch, fixture_bytes) -> None:
     gate = _Gate(routes.process_upload)
     monkeypatch.setattr(routes, "process_upload", gate)
     data = fixture_bytes("valid_minimal.csv")
 
     async def scenario() -> None:
-        async with _async_client() as client:
+        async with _async_client(logged_in) as client:
             jobs = [asyncio.create_task(_post_generate(client, data)) for _ in range(2)]
             assert await gate.entered(2)
             waiting = asyncio.create_task(_post_generate(client, data))
@@ -1059,7 +1073,7 @@ def test_generate_waits_for_a_free_slot(monkeypatch, fixture_bytes) -> None:
     asyncio.run(scenario())
 
 
-def test_job_slots_released_after_failures(monkeypatch, fixture_bytes) -> None:
+def test_job_slots_released_after_failures(logged_in: LoggedIn, monkeypatch, fixture_bytes) -> None:
     monkeypatch.setattr(routes, "JOB_WAIT_SECONDS", 0.1)
     real = routes.process_upload
     calls = {"n": 0}
@@ -1071,7 +1085,7 @@ def test_job_slots_released_after_failures(monkeypatch, fixture_bytes) -> None:
         return real(*args, **kwargs)
 
     monkeypatch.setattr(routes, "process_upload", flaky)
-    with TestClient(create_app(), raise_server_exceptions=False) as client:
+    with logged_in.client(raise_server_exceptions=False) as client:
         for _ in range(2):
             failed = client.post("/generate", data=FORM, files=_csv_file("v.csv", b"x"))
             assert failed.status_code == 500

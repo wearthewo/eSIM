@@ -186,6 +186,21 @@ class Invite(Base):
     created_at: Mapped[dt.datetime] = _created_at()
 
 
+class PasswordToken(Base):
+    """A one-time set-password link for an existing user (reset, or a superadmin's first
+    password). Only the SHA-256 of the random token is stored."""
+
+    __tablename__ = "password_tokens"
+    __table_args__ = (_digest_check("token_hash"),)
+
+    id: Mapped[int] = _id()
+    token_hash: Mapped[bytes] = mapped_column(LargeBinary, unique=True)
+    user_id: Mapped[int] = _fk("users.id", "CASCADE", nullable=False, index=True)
+    expires_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True))
+    used_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[dt.datetime] = _created_at()
+
+
 class UserSession(Base):
     """A login session. Only hashes of the session and CSRF tokens are stored."""
 

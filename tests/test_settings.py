@@ -10,10 +10,12 @@ import pickle
 import pytest
 
 from app.settings import (
+    DEFAULT_PUBLIC_BASE_URL,
     DRIVER_SCHEME,
     Secret,
     Settings,
     SettingsError,
+    check_web_settings,
     load_settings,
     normalize_database_url,
     safe_url,
@@ -32,6 +34,7 @@ def _prod(**overrides: str | None) -> dict[str, str]:
         "DATABASE_URL": DB_URL,
         "SECRET_KEY": SECRET_KEY,
         "FINGERPRINT_KEY": FINGERPRINT_KEY,
+        "PUBLIC_BASE_URL": "https://esim.example.invalid",
     }
     for name, value in overrides.items():
         if value is None:
@@ -117,6 +120,69 @@ def test_production_errors_never_contain_the_database_password() -> None:
         load_settings(_prod(SECRET_KEY="tiny-value"))
     assert PASSWORD not in str(info.value)
     assert "tiny-value" not in str(info.value)
+
+
+# --- PUBLIC_BASE_URL and the web app ---------------------------------------------------
+
+
+def test_public_base_url_defaults_to_local_in_development() -> None:
+    assert load_settings({}).public_base_url == DEFAULT_PUBLIC_BASE_URL
+    assert not load_settings({}).cookie_secure
+
+
+def test_public_base_url_trailing_slash_is_stripped() -> None:
+    settings = load_settings(_prod(PUBLIC_BASE_URL="https://esim.example.invalid/"))
+    assert settings.public_base_url == "https://esim.example.invalid"
+    assert settings.cookie_secure
+
+
+@pytest.mark.parametrize(
+    ("value", "reason"),
+    [
+        (None, "PUBLIC_BASE_URL is missing"),
+        ("http://esim.example.invalid", "PUBLIC_BASE_URL must be an https URL"),
+        ("esim.example.invalid", "PUBLIC_BASE_URL must be an https URL"),
+        ("https://", "PUBLIC_BASE_URL must be an https URL"),
+    ],
+)
+def test_production_requires_https_public_base_url(value: str | None, reason: str) -> None:
+    with pytest.raises(SettingsError, match=reason):
+        load_settings(_prod(PUBLIC_BASE_URL=value))
+
+
+@pytest.mark.parametrize("value", ["ftp://x.example.invalid", "localhost:8000", "http://"])
+def test_development_rejects_malformed_public_base_url(value: str) -> None:
+    with pytest.raises(SettingsError, match="PUBLIC_BASE_URL"):
+        load_settings({"PUBLIC_BASE_URL": value})
+
+
+def test_development_accepts_http_public_base_url() -> None:
+    settings = load_settings({"PUBLIC_BASE_URL": "http://127.0.0.1:8000/"})
+    assert settings.public_base_url == "http://127.0.0.1:8000"
+
+
+def test_web_app_needs_database_and_secret_key_in_every_env() -> None:
+    with pytest.raises(SettingsError) as info:
+        check_web_settings(load_settings({}))
+    assert "DATABASE_URL is missing" in str(info.value)
+    assert "SECRET_KEY is missing" in str(info.value)
+    check_web_settings(load_settings({"DATABASE_URL": DB_URL, "SECRET_KEY": "dev-short"}))
+    check_web_settings(load_settings(_prod()))
+
+
+def test_create_app_refuses_bad_production_settings(monkeypatch) -> None:
+    """create_app() reads get_settings(), so bad production settings stop the app."""
+    from app import settings as settings_module
+    from app.web.main import create_app
+
+    for name, value in _prod(SECRET_KEY="dev-" + "x" * 40).items():
+        monkeypatch.setenv(name, value)
+    settings_module.get_settings.cache_clear()
+    try:
+        with pytest.raises(SettingsError, match="SECRET_KEY starts with 'dev-'"):
+            create_app()
+    finally:
+        settings_module.get_settings.cache_clear()
 
 
 # --- database URL rewrite -----------------------------------------------------------

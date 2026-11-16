@@ -1,5 +1,7 @@
 """HTTP routes: the upload form, the Excel template, HTMX validation, and ZIP generation.
 
+All of them require a logged-in user (``app.web.auth.require_user``).
+
 Stateless: uploads are read from the request stream straight into memory with
 per-part caps (``read_capped``) and dropped when the response is sent. Uploads
 never go to disk. Starlette's own form parser is not used because it spools
@@ -29,7 +31,6 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, Response
-from fastapi.templating import Jinja2Templates
 from python_multipart.exceptions import FormParserError
 from python_multipart.multipart import MultipartParser, parse_options_header
 
@@ -37,6 +38,8 @@ from app.core import pipeline, sheets
 from app.core.models import Branding, ParseError, ValidationReport
 from app.core.parser import MAX_ROWS, SUPPORTED_EXTENSIONS
 from app.core.pipeline import PartError, check_upload, process_upload
+from app.web.auth import require_user
+from app.web.templating import templates
 
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024
 MAX_LOGO_BYTES = 500 * 1024
@@ -71,7 +74,6 @@ _HEX_COLOUR = re.compile(r"#[0-9a-fA-F]{6}")
 _CLIENT_STAMP = re.compile(r"[0-9]{8}_[0-9]{4}")
 STAMP_FORMAT = "%d%m%Y_%H%M"
 
-TEMPLATES_DIR: Path = Path(__file__).parent / "templates"
 DEFAULT_LOGO_PATH: Path = Path(__file__).parent / "static" / "brand" / "logo.png"
 
 MSG_MALFORMED = "The upload could not be read. Reload the page and try again."
@@ -104,8 +106,8 @@ MSG_FOOTER_LONG = f"The footer text can be at most {MAX_FOOTER_CHARS} characters
 MSG_BAD_COLOUR = "The primary colour must be a hex colour such as #1A4D8F."
 MSG_CONTROL_CHARS = "Company name and footer text must not contain control characters."
 
-router = APIRouter()
-templates = Jinja2Templates(directory=TEMPLATES_DIR)
+# Every route here needs a logged-in user, and every POST the session's CSRF token.
+router = APIRouter(dependencies=[Depends(require_user)])
 
 
 class UploadRejected(Exception):
