@@ -59,8 +59,8 @@ def process_upload(
     rows ``(part - 1) * GENERATE_CHUNK_ROWS`` onwards, at most
     ``GENERATE_CHUNK_ROWS`` of them. The ZIP is ``None`` when the report has any
     error-severity issue anywhere in the upload (all-or-nothing; warnings
-    allowed). Its ``manifest.csv`` covers only this part's rows, and so does
-    ``mailmerge.csv``, which is added when the upload has an ``email`` column.
+    allowed). Its ``manifest.xlsx`` covers only this part's rows, and so does
+    ``mailmerge.xlsx``, which is added when the upload has an ``email`` column.
 
     Raises ``PartError`` when ``part`` is out of range or ``parts`` is not
     ``part_count`` of the upload's rows. ``ParseError`` propagates to the caller.

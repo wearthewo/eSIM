@@ -78,6 +78,37 @@ def build_xlsx(*sheets: list[list[object]]) -> bytes:
     return buf.getvalue()
 
 
+def read_xlsx(data: bytes) -> list[list[str]]:
+    """Rows of the first sheet of an XLSX we generated, as strings.
+
+    Asserts that every non-empty cell is a string cell (``data_type "s"``) holding a
+    ``str``, formatted as text (``@``). Blank cells come back as ``""``.
+    """
+    from openpyxl import load_workbook
+
+    rows: list[list[str]] = []
+    for row in load_workbook(io.BytesIO(data)).active.iter_rows():
+        values: list[str] = []
+        for cell in row:
+            assert cell.number_format == "@", cell.coordinate
+            if cell.value is None:
+                values.append("")
+                continue
+            assert cell.data_type == "s", (cell.coordinate, cell.data_type)
+            assert isinstance(cell.value, str), cell.coordinate
+            values.append(cell.value)
+        rows.append(values)
+    return rows
+
+
+def xlsx_xml(data: bytes) -> bytes:
+    """Every part of an XLSX package (unzipped XML), concatenated, for raw searches."""
+    import zipfile
+
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        return b"\n".join(zf.read(name) for name in zf.namelist())
+
+
 # --- Generated at test time ----------------------------------------------------
 
 

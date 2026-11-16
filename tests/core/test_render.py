@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import base64
+import io
+import random
 import re
 import struct
+import sys
 import zlib
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 import segno
+from PIL import Image, ImageDraw
 from reportlab.lib.units import cm
 from reportlab.pdfbase import pdfmetrics
 
@@ -206,18 +211,28 @@ def pdf_text(pdf) -> str:
 
 
 def test_bundled_fonts_present() -> None:
-    for name in ("DejaVuSans.ttf", "DejaVuSans-Bold.ttf", "LICENSE_DEJAVU"):
+    for name in ("DejaVuSans.ttf", "LICENSE_DEJAVU"):
         assert (render.FONT_DIR / name).is_file()
 
 
 def test_register_fonts_is_idempotent() -> None:
     render.register_fonts()
-    first = pdfmetrics.getFont(render.FONT_REGULAR), pdfmetrics.getFont(render.FONT_BOLD)
+    first = pdfmetrics.getFont(render.UNICODE_FONT)
     render.register_fonts()
-    second = pdfmetrics.getFont(render.FONT_REGULAR), pdfmetrics.getFont(render.FONT_BOLD)
-    assert first[0] is second[0]
-    assert first[1] is second[1]
-    assert {render.FONT_REGULAR, render.FONT_BOLD} <= set(pdfmetrics.getRegisteredFontNames())
+    assert pdfmetrics.getFont(render.UNICODE_FONT) is first
+    assert render.UNICODE_FONT in pdfmetrics.getRegisteredFontNames()
+
+
+def base_fonts(pdf: bytes) -> set[str]:
+    """``/BaseFont`` names, without the 6-letter subset tag."""
+    return {name.decode() for name in re.findall(rb"/BaseFont /(?:[A-Z]{6}\+)?([\w-]+)", pdf)}
+
+
+def test_user_font_is_helvetica_only_for_pure_ascii() -> None:
+    assert render.user_font("Example Telecom (test)") == "Helvetica"
+    assert render.user_font("") == "Helvetica"
+    assert render.user_font(GREEK_NAME) == render.UNICODE_FONT
+    assert render.user_font("Café") == render.UNICODE_FONT  # Latin-1 is not ASCII
 
 
 # --- basic structure --------------------------------------------------------------
@@ -250,10 +265,58 @@ def test_text_extractor_sanity(pdf_text) -> None:
 
 def test_render_pdf_greek_names_use_embedded_dejavu(pdf, pdf_text) -> None:
     assert re.search(rb"/BaseFont /[A-Z]{6}\+DejaVuSans\b", pdf)
-    assert re.search(rb"/BaseFont /[A-Z]{6}\+DejaVuSans-Bold\b", pdf)
     assert b"/FontFile2" in pdf  # the TrueType program itself is embedded
+    # Regular DejaVu only; fixed text stays in the (not embedded) standard fonts.
+    assert base_fonts(pdf) == {"Helvetica", "Helvetica-Bold", "DejaVuSans"}
+    assert pdf.count(b"/FontFile2") == 1
     assert GREEK_NAME in pdf_text
     assert GREEK_PLAN in pdf_text
+
+
+def test_render_pdf_ascii_only_embeds_no_font() -> None:
+    data = render.render_pdf(RECORD_WITH_CONFIRMATION, BRANDING)
+    assert base_fonts(data) == {"Helvetica", "Helvetica-Bold"}
+    assert b"/FontFile" not in data
+    text = extract_text(data)
+    for expected in ("Test Customer 1", "Test Plan 5GB", "Example Telecom (test)", "iPhone"):
+        assert expected in text
+
+
+def test_render_pdf_each_user_string_picks_its_own_font() -> None:
+    # Greek company name only: DejaVu for it, Helvetica for the ASCII customer/plan.
+    branding = Branding(company_name="Εταιρεία Δοκιμής", footer_text="Support: x@example.invalid")
+    data = render.render_pdf(RECORD_WITH_CONFIRMATION, branding)
+    assert base_fonts(data) == {"Helvetica", "Helvetica-Bold", "DejaVuSans"}
+    text = extract_text(data)
+    assert "Εταιρεία Δοκιμής" in text
+    assert "Test Customer 1" in text
+    assert "Support: x@example.invalid" in text
+
+
+def test_render_pdf_concurrent_greek_renders_match_sequential() -> None:
+    # ReportLab's TrueType parser has one shared read position, used while
+    # building each PDF's embedded subset; renders on several threads must not
+    # interfere with each other.
+    records = [
+        EsimRecord(
+            row_number=n,
+            iccid="8999000000000000013",
+            activation_code=ACTIVATION,
+            customer_name=f"{GREEK_NAME} {'άέήίόύώ'[: n % 8]}",
+            plan_name=GREEK_PLAN,
+        )
+        for n in range(2, 26)
+    ]
+    prepared = render.prepare_branding(BRANDING)
+    expected = [render.render_pdf(r, prepared) for r in records]
+    interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)  # switch threads often, so a race shows up reliably
+    try:
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            for _ in range(3):
+                assert list(pool.map(lambda r: render.render_pdf(r, prepared), records)) == expected
+    finally:
+        sys.setswitchinterval(interval)
 
 
 def test_render_pdf_contains_required_text(pdf_text) -> None:
@@ -316,13 +379,14 @@ def test_render_pdf_with_logo() -> None:
     assert len(qr_drawings(data)) == 1
 
 
+def _png_chunk(kind: bytes, data: bytes) -> bytes:
+    crc = struct.pack(">I", zlib.crc32(kind + data))
+    return struct.pack(">I", len(data)) + kind + data + crc
+
+
 def _rgba_png(width: int, height: int) -> bytes:
     """Minimal RGBA PNG: opaque blue box on a transparent background."""
-
-    def chunk(kind: bytes, data: bytes) -> bytes:
-        crc = struct.pack(">I", zlib.crc32(kind + data))
-        return struct.pack(">I", len(data)) + kind + data + crc
-
+    chunk = _png_chunk
     rows = b"".join(
         b"\x00"
         + b"".join(
@@ -346,6 +410,124 @@ def test_render_pdf_transparent_logo_keeps_soft_mask() -> None:
     data = render.render_pdf(RECORD, branding)
     assert len(image_draws(data)) == 1
     assert b"/SMask" in decompressed(data)
+
+
+def _pil_png(image: Image.Image) -> bytes:
+    buf = io.BytesIO()
+    image.save(buf, "PNG")
+    return buf.getvalue()
+
+
+def _logo_box(size: tuple[int, int], mode: str = "RGBA") -> bytes:
+    """Flat-colour logo: blue box with a 10% transparent (or white) border."""
+    image = Image.new(mode, size, (0, 0, 0, 0) if mode == "RGBA" else "white")
+    w, h = size
+    ImageDraw.Draw(image).rectangle((w // 10, h // 10, w - w // 10, h - h // 10), (26, 115, 232))
+    return _pil_png(image)
+
+
+def _photo_logo(size: tuple[int, int]) -> bytes:
+    """Photo-like logo (smooth random texture) with a soft alpha edge; deterministic."""
+    w, h = size
+    rng = random.Random(0)  # noqa: S311 (test pixels, not crypto)
+    channels = [
+        Image.frombytes("L", (w // 8, h // 8), rng.randbytes(w * h // 64)).resize(
+            size, Image.Resampling.BICUBIC
+        )
+        for _ in range(3)
+    ]
+    image = Image.merge("RGB", channels).convert("RGBA")
+    image.putalpha(Image.linear_gradient("L").rotate(90).resize(size))
+    return _pil_png(image)
+
+
+def logo_images(pdf: bytes) -> dict[str, tuple[bytes, bytes]]:
+    """Image XObjects by role ("colour" or "mask"): (dictionary, decoded stream)."""
+    images = [(h, s) for h, s in _objects(pdf).values() if b"/Subtype /Image" in h]
+    out = {}
+    for head, stream in images:
+        out["colour" if b"/SMask" in head or len(images) == 1 else "mask"] = (head, stream)
+    return out
+
+
+def _dict_int(head: bytes, key: bytes) -> int:
+    return int(re.search(rb"/" + key + rb" (\d+)", head).group(1))
+
+
+def flate_image(head: bytes, filtered: bytes) -> Image.Image:
+    """Rebuild a PNG from a Flate+PNG-predictor image stream and decode it with Pillow."""
+    assert b"/FlateDecode" in head and b"/Predictor 15" in head
+    width, height = _dict_int(head, b"Width"), _dict_int(head, b"Height")
+    assert _dict_int(head, b"Columns") == width
+    colour_type = {3: 2, 1: 0}[_dict_int(head, b"Colors")]
+    png = (
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, colour_type, 0, 0, 0))
+        + _png_chunk(b"IDAT", zlib.compress(filtered))
+        + _png_chunk(b"IEND", b"")
+    )
+    image = Image.open(io.BytesIO(png))
+    image.load()
+    return image
+
+
+def _needed_px(points: float) -> int:
+    return round(points / 72 * render.LOGO_DPI)
+
+
+def test_render_pdf_large_logo_is_downscaled_to_300dpi_and_keeps_transparency() -> None:
+    branding = Branding(company_name="Example", logo_png=_logo_box((2000, 800)))
+    data = render.render_pdf(RECORD, branding)
+    [(width, height)] = image_draws(data)  # drawn size is unchanged by the downscale
+    assert (width, height) == pytest.approx((render.LOGO_MAX_WIDTH, render.LOGO_MAX_HEIGHT))
+    images = logo_images(data)
+    for head, _ in images.values():
+        assert _dict_int(head, b"Width") == _needed_px(render.LOGO_MAX_WIDTH)  # 591
+        assert _dict_int(head, b"Height") == _needed_px(render.LOGO_MAX_HEIGHT)  # 236
+    colour_head, colour = images["colour"]
+    mask_head, mask = images["mask"]
+    assert b"/ColorSpace /DeviceRGB" in colour_head
+    assert b"/ColorSpace /DeviceGray" in mask_head
+    # Flat colours: PNG is smaller than JPEG. Decode both and check the pixels.
+    rgb, alpha = flate_image(colour_head, colour), flate_image(mask_head, mask)
+    centre = (rgb.width // 2, rgb.height // 2)
+    assert rgb.getpixel(centre) == (26, 115, 232)
+    assert alpha.getpixel(centre) == 255
+    assert alpha.getpixel((0, 0)) == 0
+
+
+def test_render_pdf_small_logo_is_not_enlarged() -> None:
+    data = render.render_pdf(RECORD, Branding(company_name="Example", logo_png=_rgba_png(40, 20)))
+    for head, _ in logo_images(data).values():
+        assert (_dict_int(head, b"Width"), _dict_int(head, b"Height")) == (40, 20)
+
+
+def test_render_pdf_photo_logo_uses_jpeg_when_smaller() -> None:
+    branding = Branding(company_name="Example", logo_png=_photo_logo((1600, 640)))
+    data = render.render_pdf(RECORD, branding)
+    images = logo_images(data)
+    colour_head, _ = images["colour"]
+    mask_head, mask = images["mask"]
+    assert b"/DCTDecode" in colour_head
+    assert b"/SMask" in colour_head
+    assert b"/FlateDecode" in mask_head  # the soft mask is always lossless
+    alpha = flate_image(mask_head, mask)
+    assert alpha.size == (_needed_px(render.LOGO_MAX_WIDTH), _needed_px(render.LOGO_MAX_HEIGHT))
+
+
+def test_render_pdf_opaque_logo_has_no_soft_mask() -> None:
+    opaque = Image.new("RGBA", (300, 100), (26, 115, 232, 255))
+    data = render.render_pdf(RECORD, Branding(company_name="Example", logo_png=_pil_png(opaque)))
+    [(head, _)] = logo_images(data).values()
+    assert b"/SMask" not in head
+
+
+def test_render_pdf_greyscale_jpeg_logo() -> None:
+    buf = io.BytesIO()
+    Image.new("L", (64, 16), 90).save(buf, "JPEG")
+    data = render.render_pdf(RECORD, Branding(company_name="Example", logo_png=buf.getvalue()))
+    [(head, _)] = logo_images(data).values()
+    assert b"/ColorSpace /DeviceGray" in head
 
 
 def test_prepared_branding_is_reused_across_pdfs() -> None:

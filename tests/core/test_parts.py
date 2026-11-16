@@ -7,7 +7,6 @@ rendered. Most tests shrink ``GENERATE_CHUNK_ROWS`` so they render few PDFs.
 
 from __future__ import annotations
 
-import csv
 import io
 import zipfile
 
@@ -15,7 +14,7 @@ import pytest
 
 from app.core import parser, pipeline, validator, zipper
 from app.core.models import Branding, ParseError
-from tests.conftest import synthetic_csv, synthetic_iccid
+from tests.conftest import read_xlsx, synthetic_csv, synthetic_iccid
 
 BRANDING = Branding(company_name="Example Telecom (test)")
 
@@ -31,7 +30,7 @@ def _csv_with_emails(count: int) -> bytes:
 
 
 def _rows(zf: zipfile.ZipFile, name: str) -> list[list[str]]:
-    return list(csv.reader(io.StringIO(zf.read(name).decode("utf-8-sig"))))
+    return read_xlsx(zf.read(name))
 
 
 def _part(data: bytes, part: int, parts: int) -> zipfile.ZipFile:

@@ -50,7 +50,7 @@ SURNAMES = (
 )  # fmt: skip
 # Greek letters used to build a different character set per row (bench worst case).
 # Letters of the plan names are left out so the non-ASCII characters drawn in the
-# bold font (name + plan) are unique per row, not just the name's.
+# embedded DejaVu Sans subset (name + plan) are unique per row, not just the name's.
 GREEK = "".join(
     ch
     for ch in "αβγδεζηθικλμνξοπρστυφχψωάέήίόύώΑΒΓΔΕΖΗΘΙΚΛΜΝΞΟΠΡΣΤΥΦΧΨΩ"

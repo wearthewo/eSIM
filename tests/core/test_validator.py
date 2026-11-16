@@ -113,6 +113,51 @@ def test_validate_iccid_missing_89_prefix_is_warning_only() -> None:
     assert validator.validate_iccid(iccid) == [("iccid_prefix", "warning")]
 
 
+# --- Excel scientific notation ------------------------------------------------
+
+EXCEL_MESSAGE = (
+    "Excel converted this value to a number. Format the column as Text and re-enter the values."
+)
+
+
+@pytest.mark.parametrize("value", ["8.999E+18", "8.99900000000000E+18", "9e+18", "8,999E+18"])
+def test_validate_iccid_excel_scientific(value: str) -> None:
+    assert validator.validate_iccid(value) == [("excel_scientific", "error")]
+
+
+@pytest.mark.parametrize("value", ["1.01E+14", "1.01e+14"])
+def test_validate_imsi_excel_scientific(value: str) -> None:
+    assert validator.validate_imsi(value) == "excel_scientific"
+
+
+@pytest.mark.parametrize("value", ["3.069E+11", "+3.069e+11"])
+def test_validate_msisdn_excel_scientific(value: str) -> None:
+    assert validator.validate_msisdn(value) == "excel_scientific"
+
+
+@pytest.mark.parametrize("value", ["8999E00000000000013", "8999e-0000000000013"])
+def test_validate_iccid_other_letters_are_plain_format_errors(value: str) -> None:
+    assert validator.validate_iccid(value) == [("iccid_format", "error")]
+
+
+def test_validate_reports_excel_scientific_per_field() -> None:
+    report = validator.validate(
+        [
+            _rec(2, iccid="8.999E+18", imsi="1.01E+14", msisdn="3.069E+11"),
+            _rec(3, iccid="8999000000000000021", activation_code=f"LPA:1${HOST}$TEST-0002"),
+        ]
+    )
+    excel = [i for i in report.issues if i.code == "excel_scientific"]
+    assert [(i.row_number, i.field, i.severity) for i in excel] == [
+        (2, "iccid", "error"),
+        (2, "imsi", "error"),
+        (2, "msisdn", "error"),
+    ]
+    assert {i.message for i in excel} == {EXCEL_MESSAGE}
+    assert validator.MESSAGES["excel_scientific"] == EXCEL_MESSAGE
+    assert [r.row_number for r in report.valid] == [3]
+
+
 # --- validate_activation_code -------------------------------------------------
 
 

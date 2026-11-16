@@ -29,7 +29,7 @@ class EsimRecord:
     ``activation_code`` is always the full LPA string, given directly or built
     from ``smdp_address`` + ``matching_id``. ``confirmation_code`` is a
     separate secret and is never part of ``activation_code``. ``email`` is
-    personal data used only for ``mailmerge.csv``: never printed on the PDF,
+    personal data used only for ``mailmerge.xlsx``: never printed on the PDF,
     never logged, and redacted in ``repr``.
     """
 

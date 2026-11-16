@@ -1,4 +1,4 @@
-"""HTTP routes: the upload form, HTMX validation, and ZIP generation.
+"""HTTP routes: the upload form, the Excel template, HTMX validation, and ZIP generation.
 
 Stateless: uploads are read from the request stream straight into memory with
 per-part caps (``read_capped``) and dropped when the response is sent. Uploads
@@ -33,7 +33,7 @@ from fastapi.templating import Jinja2Templates
 from python_multipart.exceptions import FormParserError
 from python_multipart.multipart import MultipartParser, parse_options_header
 
-from app.core import pipeline
+from app.core import pipeline, sheets
 from app.core.models import Branding, ParseError, ValidationReport
 from app.core.parser import MAX_ROWS, SUPPORTED_EXTENSIONS
 from app.core.pipeline import PartError, check_upload, process_upload
@@ -524,6 +524,25 @@ async def index(
 ) -> HTMLResponse:
     """GET /: render the upload form."""
     return _page(request, _form_values(defaults))
+
+
+TEMPLATE_FILENAME = "esim_template.xlsx"
+XLSX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+@lru_cache(maxsize=1)
+def _template_xlsx() -> bytes:
+    return sheets.build_template()  # deterministic, so built once per process
+
+
+@router.get("/template.xlsx", response_model=None)
+async def template_xlsx() -> Response:
+    """GET /template.xlsx: the upload template (all columns as text, one synthetic row)."""
+    return Response(
+        content=_template_xlsx(),
+        media_type=XLSX_MEDIA_TYPE,
+        headers={"Content-Disposition": f'attachment; filename="{TEMPLATE_FILENAME}"'},
+    )
 
 
 @router.post("/validate", response_class=HTMLResponse)

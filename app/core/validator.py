@@ -37,7 +37,10 @@ MESSAGES: dict[str, str] = {
     "activation_code_host": "Activation code has an empty SM-DP+ address.",
     "activation_code_matching_id": "Activation code has an empty matching ID.",
     "email_format": "Email address is not valid (expected a form like name@example.com).",
-    "email_missing": "No email; row will have an empty address in mailmerge.csv",
+    "email_missing": "No email; row will have an empty address in mailmerge.xlsx",
+    "excel_scientific": (
+        "Excel converted this value to a number. Format the column as Text and re-enter the values."
+    ),
 }
 
 
@@ -87,11 +90,14 @@ def _issue(row: int, field: str, code: str, severity: Severity = "error") -> Val
 def validate_iccid(value: str) -> list[tuple[str, Severity]]:
     """Check an ICCID string and return a list of ``(issue_code, severity)``.
 
-    Errors: not 19-20 digits, failed Luhn check digit.
+    Errors: Excel scientific notation (``excel_scientific``), not 19-20 digits,
+    failed Luhn check digit.
     Warning: does not start with the ``89`` telecom prefix.
     """
     if not value:
         return [("iccid_missing", "error")]
+    if excel_scientific(value):
+        return [("excel_scientific", "error")]
     if not _DIGITS.fullmatch(value):
         return [("iccid_format", "error")]
     if len(value) not in (19, 20):
@@ -105,13 +111,26 @@ def validate_iccid(value: str) -> list[tuple[str, Severity]]:
     return found
 
 
+def excel_scientific(value: str) -> bool:
+    """True if ``value`` looks like Excel's scientific notation (``8.999E+18``).
+
+    Excel shows long digit strings that way once it has stored them as numbers,
+    and saving to CSV then writes that text: the trailing digits are already lost.
+    """
+    return "e+" in value.lower()
+
+
 def validate_imsi(value: str) -> str | None:
     """Return an issue code if ``value`` is not exactly 15 digits, else None."""
+    if excel_scientific(value):
+        return "excel_scientific"
     return None if _IMSI.fullmatch(value) else "imsi_format"
 
 
 def validate_msisdn(value: str) -> str | None:
     """Return an issue code unless ``value`` is an optional ``+`` then 7-15 digits."""
+    if excel_scientific(value):
+        return "excel_scientific"
     return None if _MSISDN.fullmatch(value) else "msisdn_format"
 
 

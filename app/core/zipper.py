@@ -1,24 +1,26 @@
 """In-memory ZIP assembly plus the manifest and the mail-merge list.
 
-PDFs are already compressed, so entries use ``ZIP_STORED``. The manifest
-lists only ``row_number``, ``iccid`` and ``pdf_filename``. ``mailmerge.csv``
+PDFs are already compressed, so entries use ``ZIP_STORED``. ``manifest.xlsx``
+lists only ``row_number``, ``iccid`` and ``pdf_filename``. ``mailmerge.xlsx``
 (only for uploads with an ``email`` column) lists ``email``, ``customer_name``,
 ``plan_name``, ``iccid`` and ``pdf_filename``. Neither file ever contains
-activation codes, matching IDs or confirmation codes.
+activation codes, matching IDs or confirmation codes. Both are Excel files in
+which every cell is text (see ``app.core.sheets``).
 """
 
 from __future__ import annotations
 
-import csv
 import io
 import re
 import unicodedata
 import zipfile
 from collections.abc import Iterable
 
-MANIFEST_NAME = "manifest.csv"
+from app.core.sheets import FIXED_DATE_TIME, text_xlsx
+
+MANIFEST_NAME = "manifest.xlsx"
 MANIFEST_COLUMNS: tuple[str, str, str] = ("row_number", "iccid", "pdf_filename")
-MAILMERGE_NAME = "mailmerge.csv"
+MAILMERGE_NAME = "mailmerge.xlsx"
 MAILMERGE_COLUMNS: tuple[str, str, str, str, str] = (
     "email",
     "customer_name",
@@ -26,10 +28,7 @@ MAILMERGE_COLUMNS: tuple[str, str, str, str, str] = (
     "iccid",
     "pdf_filename",
 )
-CSV_INJECTION_PREFIXES: tuple[str, ...] = ("=", "+", "-", "@", "\t", "\r")
 FALLBACK_STEM = "file"
-# Earliest timestamp a ZIP entry can hold; fixed so identical input gives identical bytes.
-FIXED_DATE_TIME: tuple[int, int, int, int, int, int] = (1980, 1, 1, 0, 0, 0)
 
 _SEPARATORS = re.compile(r"[/\\]")
 # Characters Windows refuses in filenames (separators are handled separately).
@@ -68,41 +67,23 @@ def _clean(text: str) -> str:
     return text.lstrip(". ").rstrip(". ")
 
 
-def escape_csv_cell(value: str) -> str:
-    """Neutralize spreadsheet formula injection.
-
-    Prefixes ``'`` to any cell starting with one of ``CSV_INJECTION_PREFIXES``
-    (``= + - @ \\t \\r``).
-    """
-    return "'" + value if value.startswith(CSV_INJECTION_PREFIXES) else value
-
-
 def build_manifest(entries: Iterable[tuple[int, str, str]]) -> bytes:
-    """Render ``(row_number, iccid, pdf_filename)`` rows as UTF-8 CSV bytes.
+    """Render ``(row_number, iccid, pdf_filename)`` rows as ``manifest.xlsx`` bytes.
 
-    Starts with a BOM so Excel detects UTF-8 (Greek names display correctly).
-    Writes a header row and escapes every cell. Secrets are never included.
+    A bold, frozen header row, then one row per PDF; every cell is text (the row
+    number too). Secrets are never included.
     """
-    return _csv_bytes(MANIFEST_COLUMNS, entries)
+    return text_xlsx(MANIFEST_COLUMNS, entries, title="manifest")
 
 
 def build_mailmerge(entries: Iterable[tuple[str, str, str, str, str]]) -> bytes:
-    """Render ``(email, customer_name, plan_name, iccid, pdf_filename)`` rows as UTF-8 CSV bytes.
+    """Render ``(email, customer_name, plan_name, iccid, pdf_filename)`` rows as
+    ``mailmerge.xlsx`` bytes.
 
-    For a mail merge run by the user; the server never sends mail. Starts with
-    a BOM, writes a header row and escapes every cell, like the manifest.
-    Secrets are never included.
+    For a mail merge run by the user; the server never sends mail. Same format
+    as the manifest. Secrets are never included.
     """
-    return _csv_bytes(MAILMERGE_COLUMNS, entries)
-
-
-def _csv_bytes(header: Iterable[str], rows: Iterable[Iterable[object]]) -> bytes:
-    buf = io.StringIO()
-    writer = csv.writer(buf, lineterminator="\r\n")
-    writer.writerow(header)
-    for row in rows:
-        writer.writerow([escape_csv_cell(str(cell)) for cell in row])
-    return buf.getvalue().encode("utf-8-sig")
+    return text_xlsx(MAILMERGE_COLUMNS, entries, title="mailmerge")
 
 
 def build_zip(

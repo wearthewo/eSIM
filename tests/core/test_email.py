@@ -1,12 +1,11 @@
-"""The optional ``email`` column and ``mailmerge.csv`` (parser, validator, models, zip, pipeline).
+"""The optional ``email`` column and ``mailmerge.xlsx`` (parser, validator, models, zip, pipeline).
 
-The server never sends mail. The address only goes into ``mailmerge.csv`` so the
+The server never sends mail. The address only goes into ``mailmerge.xlsx`` so the
 user can run a mail merge. It is never printed on a PDF and never logged.
 """
 
 from __future__ import annotations
 
-import csv
 import io
 import zipfile
 
@@ -14,7 +13,7 @@ import pytest
 
 from app.core import parser, pipeline, render, validator, zipper
 from app.core.models import Branding, EsimRecord
-from tests.conftest import FIXTURES_DIR, build_xlsx
+from tests.conftest import FIXTURES_DIR, build_xlsx, read_xlsx, xlsx_xml
 from tests.core.test_render import decompressed, extract_text
 
 AC1 = "LPA:1$smdp.example.invalid$TEST-0001-AAAA-BBBB"
@@ -23,7 +22,7 @@ ICCID1 = "8999000000000000013"
 ICCID2 = "8999000000000000021"
 BRANDING = Branding(company_name="Example Telecom (test)", footer_text="help@example.invalid")
 FIXTURE = "emails_greek_mixed.csv"
-MISSING_EMAIL_MESSAGE = "No email; row will have an empty address in mailmerge.csv"
+MISSING_EMAIL_MESSAGE = "No email; row will have an empty address in mailmerge.xlsx"
 SECRET_MARKERS = ("LPA:1$", "smdp.example.invalid", "TEST-0", "CONF0")
 
 
@@ -37,10 +36,6 @@ def _valid_fixture() -> bytes:
     kept = [line for line in lines if not line.endswith(",eleni.example.invalid")]
     assert len(kept) == len(lines) - 1
     return ("\n".join(kept) + "\n").encode("utf-8")
-
-
-def _csv_rows(data: bytes) -> list[list[str]]:
-    return list(csv.reader(io.StringIO(data.decode("utf-8-sig"))))
 
 
 # --- parser ---------------------------------------------------------------------------
@@ -223,7 +218,7 @@ def test_email_is_never_printed_on_the_pdf() -> None:
     )
 
 
-# --- zipper: mailmerge.csv ----------------------------------------------------------------
+# --- zipper: mailmerge.xlsx ---------------------------------------------------------------
 
 
 def test_build_mailmerge() -> None:
@@ -239,8 +234,8 @@ def test_build_mailmerge() -> None:
             ("", "", "", ICCID2, f"esim_{ICCID2}.pdf"),
         ]
     )
-    assert data.startswith(b"\xef\xbb\xbf")  # BOM, so Excel reads the Greek as UTF-8
-    assert _csv_rows(data) == [
+    assert data.startswith(b"PK\x03\x04")  # XLSX: Excel reads the Greek without a BOM
+    assert read_xlsx(data) == [  # every cell a text-formatted string cell
         ["email", "customer_name", "plan_name", "iccid", "pdf_filename"],
         [
             "maria@example.invalid",
@@ -260,24 +255,19 @@ def test_build_mailmerge() -> None:
     )
 
 
-def test_build_mailmerge_escapes_every_cell() -> None:
-    data = zipper.build_mailmerge(
-        [("=cmd|'/c calc'!A1@example.invalid", "+SUM(A1)", "-2+3", "@x", "\tname.pdf")]
-    )
-    assert _csv_rows(data)[1] == [
-        "'=cmd|'/c calc'!A1@example.invalid",
-        "'+SUM(A1)",
-        "'-2+3",
-        "'@x",
-        "'\tname.pdf",
-    ]
+def test_build_mailmerge_formula_like_cells_stay_literal_text() -> None:
+    row = ("=cmd|'/c calc'!A1@example.invalid", "+SUM(A1)", "-2+3", "@x", "=1+1.pdf")
+    data = zipper.build_mailmerge([row])
+    assert read_xlsx(data)[1] == list(row)  # unchanged: no ' prefix, not formulas
+    sheet = xlsx_xml(data)
+    assert b"<f>" not in sheet and b"<f " not in sheet
 
 
-def test_build_mailmerge_quotes_commas_and_newlines() -> None:
+def test_build_mailmerge_keeps_commas_quotes_and_newlines() -> None:
     data = zipper.build_mailmerge(
         [("a@example.invalid", 'Last, "First"', "Line1\nLine2", ICCID1, "f.pdf")]
     )
-    assert _csv_rows(data)[1][1:3] == ['Last, "First"', "Line1\nLine2"]
+    assert read_xlsx(data)[1][1:3] == ['Last, "First"', "Line1\nLine2"]
 
 
 def test_build_zip_adds_mailmerge_after_manifest() -> None:
@@ -287,9 +277,10 @@ def test_build_zip_adds_mailmerge_after_manifest() -> None:
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
         assert zf.namelist() == ["a.pdf", zipper.MANIFEST_NAME, zipper.MAILMERGE_NAME]
         assert zf.read(zipper.MAILMERGE_NAME) == mailmerge
-    assert zipper.MAILMERGE_NAME == "mailmerge.csv"
+    assert zipper.MANIFEST_NAME == "manifest.xlsx"
+    assert zipper.MAILMERGE_NAME == "mailmerge.xlsx"
     with pytest.raises(ValueError, match="Duplicate"):
-        zipper.build_zip([("MailMerge.csv", b"x")], manifest, mailmerge)
+        zipper.build_zip([("MailMerge.xlsx", b"x")], manifest, mailmerge)
 
 
 # --- pipeline -----------------------------------------------------------------------------
@@ -305,10 +296,10 @@ def test_pipeline_adds_mailmerge_when_the_file_has_an_email_column() -> None:
         pdfs = [n for n in zf.namelist() if n.endswith(".pdf")]
         assert zf.namelist() == [*pdfs, zipper.MANIFEST_NAME, zipper.MAILMERGE_NAME]
         raw = zf.read(zipper.MAILMERGE_NAME)
-        manifest = _csv_rows(zf.read(zipper.MANIFEST_NAME))
+        manifest_raw = zf.read(zipper.MANIFEST_NAME)
         pdf_bytes = b"".join(zf.read(n) + decompressed(zf.read(n)) for n in pdfs)
-    assert raw.startswith(b"\xef\xbb\xbf")
-    rows = _csv_rows(raw)
+    manifest = read_xlsx(manifest_raw)
+    rows = read_xlsx(raw)
     assert rows == [
         list(zipper.MAILMERGE_COLUMNS),
         [
@@ -342,12 +333,13 @@ def test_pipeline_adds_mailmerge_when_the_file_has_an_email_column() -> None:
     ]
     # Same rows, same order and same file names as the manifest and the archive.
     assert [r[4] for r in rows[1:]] == [r[2] for r in manifest[1:]] == pdfs
-    text = raw.decode("utf-8-sig")
-    for marker in SECRET_MARKERS:
-        assert marker not in text
-    # Addresses appear only in mailmerge.csv: not in the PDFs, not in the manifest.
+    for xml in (xlsx_xml(raw), xlsx_xml(manifest_raw)):  # every unzipped XML part
+        for marker in SECRET_MARKERS:
+            assert marker.encode() not in xml
+    # Addresses appear only in mailmerge.xlsx: not in the PDFs, not in the manifest.
     assert b"maria.p@" not in pdf_bytes and b"Giorgos.N@" not in pdf_bytes
     assert all("@" not in cell for row in manifest for cell in row)
+    assert b"example.invalid" not in xlsx_xml(manifest_raw)
 
 
 @pytest.mark.parametrize("name", ["valid_minimal.csv", "valid_full.csv", "valid_greek_names.csv"])

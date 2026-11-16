@@ -14,10 +14,13 @@ Everything stays in memory; nothing is written to disk. Data is synthetic only
 (see ``make_big_csv.py``). Never point this at real data.
 
 Name modes (``--names``):
-  same    every row has the same Greek name: best case for the font-subset cache
+  same    every row has the same Greek name
   pool    names from a pool of Greek first names and surnames, like a real order
-  unique  every row has a different set of Greek characters: worst case
-          (``--unique-names`` is short for ``--names unique``)
+  unique  every row has a different set of Greek characters: worst case (largest
+          embedded font subsets; ``--unique-names`` is short for ``--names unique``)
+
+Greek names are embedded as a DejaVu Sans subset in every PDF; pure-ASCII text
+uses the built-in Helvetica and embeds no font.
 """
 
 from __future__ import annotations

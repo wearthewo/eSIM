@@ -18,13 +18,22 @@ import httpx
 import pytest
 import starlette.formparsers
 from fastapi.testclient import TestClient
+from openpyxl import load_workbook
+from openpyxl.utils import get_column_letter
 from PIL import Image
 
-from app.core import parser, pipeline, zipper
+from app.core import parser, pipeline, sheets, zipper
 from app.core.models import Branding
 from app.web import routes
 from app.web.main import SECURITY_HEADERS, create_app
-from tests.conftest import FIXTURES_DIR, OVERSIZE_CAP_BYTES, synthetic_csv, synthetic_iccid
+from tests.conftest import (
+    FIXTURES_DIR,
+    OVERSIZE_CAP_BYTES,
+    read_xlsx,
+    synthetic_csv,
+    synthetic_iccid,
+    xlsx_xml,
+)
 from tests.core.test_email import MISSING_EMAIL_MESSAGE
 from tests.core.test_email import _valid_fixture as valid_emails_csv
 
@@ -184,6 +193,54 @@ def test_index_renders(client: TestClient) -> None:
     assert "download_token" not in html
     assert "10000 rows" in html and "parts of 500" in html
     assert 'id="download"' not in html  # only after a successful validation
+
+
+def test_index_links_the_excel_template(client: TestClient) -> None:
+    html = client.get("/").text
+    assert '<a href="/template.xlsx" download>Download template (Excel)</a>' in html
+    assert "manifest.xlsx" in html and "mailmerge.xlsx" in html
+    assert "manifest.csv" not in html and "mailmerge.csv" not in html
+
+
+def test_template_xlsx(client: TestClient) -> None:
+    response = client.get("/template.xlsx")
+    assert response.status_code == 200
+    _assert_security_headers(response)
+    assert response.headers["content-type"] == routes.XLSX_MEDIA_TYPE
+    assert response.headers["content-disposition"] == 'attachment; filename="esim_template.xlsx"'
+    assert client.get("/template.xlsx").content == response.content  # deterministic
+
+    rows = read_xlsx(response.content)  # every cell a text-formatted string cell
+    assert rows[0] == list(sheets.TEMPLATE_COLUMNS)
+    assert set(rows[0]) == parser.KNOWN_COLUMNS  # every supported header
+    assert len(rows) == 2  # header + one example row
+    example = dict(zip(rows[0], rows[1], strict=True))
+    assert re.fullmatch(r"8999[0-9]{15}", example["iccid"])  # synthetic, 19 digits
+    assert example["activation_code"].startswith("LPA:1$smdp.example.invalid$")
+
+    ws = load_workbook(io.BytesIO(response.content)).active
+    assert ws.freeze_panes == "A2"
+    assert all(cell.font.b for cell in ws[1])
+    for c in range(1, len(sheets.TEMPLATE_COLUMNS) + 1):  # new rows typed in stay text
+        assert ws.column_dimensions[get_column_letter(c)].number_format == "@"
+
+
+def test_template_xlsx_is_a_valid_upload(client: TestClient) -> None:
+    data = client.get("/template.xlsx").content
+    parsed, report = pipeline.check_upload(data, "esim_template.xlsx")
+    assert report.ok and not report.issues
+    [record] = report.valid
+    assert record.iccid == sheets.TEMPLATE_EXAMPLE[0]
+    html = client.post("/validate", files={"file": ("esim_template.xlsx", data)}).text
+    assert "1 row read: 0 errors, 0 warnings." in html
+
+
+def test_validate_shows_excel_scientific_message(client: TestClient) -> None:
+    # What a CSV looks like after Excel turned the ICCID column into numbers.
+    data = b"iccid,activation_code\n8.999E+18,LPA:1$smdp.example.invalid$TEST-0001-AAAA-BBBB\n"
+    html = client.post("/validate", files=_csv_file("excel.csv", data)).text
+    assert "Excel converted this value to a number." in html
+    assert "Format the column as Text and re-enter the values." in html
 
 
 def test_index_is_csp_clean(client: TestClient) -> None:
@@ -362,7 +419,7 @@ def test_generate_returns_zip(client: TestClient, fixture_bytes) -> None:
         assert zf.namelist() == [*pdfs, zipper.MANIFEST_NAME]
         for name in pdfs:
             assert zf.read(name).startswith(b"%PDF-")
-        manifest = list(csv.reader(io.StringIO(zf.read(zipper.MANIFEST_NAME).decode("utf-8-sig"))))
+        manifest = read_xlsx(zf.read(zipper.MANIFEST_NAME))
     assert manifest == [
         list(zipper.MANIFEST_COLUMNS),
         *[
@@ -1064,8 +1121,7 @@ def test_generate_with_email_column_adds_mailmerge(client: TestClient) -> None:
         names = zf.namelist()
         assert names[-2:] == [zipper.MANIFEST_NAME, zipper.MAILMERGE_NAME]
         raw = zf.read(zipper.MAILMERGE_NAME)
-    assert raw.startswith(b"\xef\xbb\xbf")
-    rows = list(csv.reader(io.StringIO(raw.decode("utf-8-sig"))))
+    rows = read_xlsx(raw)
     assert rows[0] == list(zipper.MAILMERGE_COLUMNS)
     assert [r[0] for r in rows[1:]] == [
         "maria.p@example.invalid",
@@ -1076,7 +1132,7 @@ def test_generate_with_email_column_adds_mailmerge(client: TestClient) -> None:
     assert rows[1][1] == "Μαρία Παπαδοπούλου"
     assert [r[4] for r in rows[1:]] == names[:-2]
     for marker in ("LPA:1$", "TEST-0", "CONF0", "smdp.example.invalid"):
-        assert marker not in raw.decode("utf-8-sig")
+        assert marker.encode() not in xlsx_xml(raw)
 
 
 def test_generate_without_email_column_has_no_mailmerge(client: TestClient, fixture_bytes) -> None:
@@ -1119,7 +1175,7 @@ def _post_part(client: TestClient, data: bytes, part: object, parts: object, **e
 
 def _manifest(response) -> list[list[str]]:
     with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
-        return list(csv.reader(io.StringIO(zf.read(zipper.MANIFEST_NAME).decode("utf-8-sig"))))
+        return read_xlsx(zf.read(zipper.MANIFEST_NAME))
 
 
 @pytest.fixture
@@ -1249,7 +1305,7 @@ def test_generate_part_mailmerge_covers_only_its_rows(client: TestClient, chunk_
     ]
     response = _post_part(client, ("\n".join(lines) + "\n").encode(), 2, 3)
     with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
-        rows = list(csv.reader(io.StringIO(zf.read(zipper.MAILMERGE_NAME).decode("utf-8-sig"))))
+        rows = read_xlsx(zf.read(zipper.MAILMERGE_NAME))
     assert [row[0] for row in rows[1:]] == [f"u{i}@example.invalid" for i in (4, 5, 6)]
 
 

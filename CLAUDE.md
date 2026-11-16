@@ -10,7 +10,7 @@ openpyxl (XLSX), pytest, ruff. Phase 2: Postgres, SQLAlchemy, Alembic.
 
 ## Layout
 
-app/core/ parser.py validator.py qr.py render.py zipper.py (no web imports)
+app/core/ parser.py validator.py qr.py render.py sheets.py zipper.py pipeline.py (no webimports)
 app/web/ main.py routes.py templates/
 tests/ fixtures/ (synthetic data only)
 
@@ -23,6 +23,8 @@ tests/ fixtures/ (synthetic data only)
 - Never use real activation codes. Tests use synthetic fixtures only.
 - app/core must not import FastAPI or anything from app/web.
 - Do not add dependencies without asking.
+- Nothing may write to disk, including library temp files (openpyxl, Starlette uploads).
+- reportlab, segno and openpyxl are pinned because the code relies on their internals or exact output.
 
 ## Commands
 

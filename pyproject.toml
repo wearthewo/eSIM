@@ -16,10 +16,14 @@ dependencies = [
     # mask selection and is parity-tested against it (tests/core/test_qr.py).
     "segno>=1.6,<1.7",
     # Pinned to the minor version: app/core/render.py relies on ReportLab internals
-    # (mirrors TTFont.addObjects, registers prepared image XObjects via canvas._doc,
-    # sets rl_config.useA85). Re-check render.py and its tests before bumping.
+    # (registers prepared image XObjects via canvas._doc, sets rl_config.useA85).
+    # Re-check render.py and its tests before bumping. render.py also imports Pillow,
+    # which ReportLab depends on.
     "reportlab>=5.1,<5.2",
-    "openpyxl",
+    # Pinned to the minor version: app/core/sheets.py overrides
+    # ExcelWriter.write_worksheet so worksheets are serialised in memory, not via
+    # a temporary file. Re-check sheets.py and its tests before bumping.
+    "openpyxl>=3.1,<3.2",
     "defusedxml",
 ]
 

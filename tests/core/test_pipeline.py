@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import csv
 import io
 import zipfile
 
@@ -8,14 +7,13 @@ import pytest
 
 from app.core import pipeline, render, zipper
 from app.core.models import Branding, ParseError
-from tests.conftest import synthetic_csv, synthetic_iccid
+from tests.conftest import read_xlsx, synthetic_csv, synthetic_iccid, xlsx_xml
 
 BRANDING = Branding(company_name="Example Telecom (test)", footer_text="help@example.invalid")
 
 
 def _manifest_rows(zf: zipfile.ZipFile) -> list[list[str]]:
-    text = zf.read(zipper.MANIFEST_NAME).decode("utf-8-sig")
-    return list(csv.reader(io.StringIO(text)))
+    return read_xlsx(zf.read(zipper.MANIFEST_NAME))
 
 
 def _codes(report) -> set[tuple[int, str, str]]:
@@ -55,13 +53,14 @@ def test_process_upload_valid_full_manifest_has_no_secrets(fixture_bytes) -> Non
         pdfs = [n for n in zf.namelist() if n.endswith(".pdf")]
         assert len(pdfs) == len(report.valid) == 5
         manifest = zf.read(zipper.MANIFEST_NAME)
-    text = manifest.decode("utf-8-sig")
+    xml = xlsx_xml(manifest)  # every XML part of the unzipped workbook
+    assert b"8999000000000000" in xml  # sanity: the search sees the cell text
     for n in range(10, 15):
-        assert f"TEST-{n:04d}-AAAA-BBBB" not in text  # matching ID
-        assert f"CONF{n:04d}" not in text  # confirmation code
-    assert "LPA:" not in text and "smdp.example.invalid" not in text
+        assert f"TEST-{n:04d}-AAAA-BBBB".encode() not in xml  # matching ID
+        assert f"CONF{n:04d}".encode() not in xml  # confirmation code
+    assert b"LPA:" not in xml and b"smdp.example.invalid" not in xml
     for record in report.valid:
-        assert record.activation_code.encode() not in manifest
+        assert record.activation_code.encode() not in manifest + xml
 
 
 def test_process_upload_is_deterministic(fixture_bytes) -> None:

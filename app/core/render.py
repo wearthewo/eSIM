@@ -5,45 +5,52 @@ activation code, matching ID and confirmation code are never printed as text.
 When a confirmation code exists, the page only says that it will be sent
 separately.
 
-Fonts are bundled under ``app/core/assets/fonts`` (DejaVu Sans, see
-LICENSE_DEJAVU) so Greek and other non-ASCII names render correctly. This
-module resolves the font path locally and never imports ``app.web``.
+Fonts:
+
+* Fixed text (headings, labels, install steps, the confirmation note) uses the
+  PDF standard fonts Helvetica and Helvetica-Bold. They are built into every
+  PDF viewer, so nothing is embedded.
+* Text that comes from the user (company name, customer name, plan name,
+  footer) uses Helvetica when it is pure ASCII, and otherwise the bundled DejaVu
+  Sans (regular only, see ``assets/fonts/LICENSE_DEJAVU``), which ReportLab
+  embeds as a subset. So Greek and other non-ASCII names render correctly, and
+  only PDFs that need it carry a font program. These strings are never bold: the
+  hierarchy comes from size, so ASCII and non-ASCII pages look the same.
+  Validated ICCIDs are ASCII digits, so they always use Helvetica.
 
 Performance notes:
 
 * The QR code is drawn as vector rectangles straight from the module matrix
   (no PNG encode/decode, no image XObject).
-* ``prepare_branding`` decodes and compresses the logo once; ``render_pdf``
-  then reuses it for every PDF of the batch.
+* ``prepare_branding`` decodes the logo once per batch, downscales it to the
+  pixels needed at ``LOGO_DPI`` for its printed size and encodes it as PNG
+  (Flate with PNG predictors) or JPEG (DCT), whichever is smaller. Transparency
+  becomes a lossless soft mask. Every PDF of the batch reuses those bytes.
 * ASCII85 stream encoding is switched off process-wide (``rl_config.useA85``).
   It only makes PDFs 7-bit clean, costs ~25% in size, and without ReportLab's
   optional C accelerator it was the single largest cost per PDF.
+
+This module never imports ``app.web``.
 """
 
 from __future__ import annotations
 
-import copy
+import functools
 import io
 import re
+import struct
 import threading
-import zlib
-from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 
+from PIL import Image  # installed with ReportLab, which depends on Pillow
 from reportlab import rl_config
 from reportlab.lib.colors import Color, HexColor, black
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import cm
-from reportlab.lib.utils import ImageReader, simpleSplit
+from reportlab.lib.utils import simpleSplit
 from reportlab.pdfbase import pdfdoc, pdfmetrics
-from reportlab.pdfbase.ttfonts import (
-    FF_NONSYMBOLIC,
-    FF_SYMBOLIC,
-    SUBSETN,
-    TTFont,
-    makeToUnicodeCMap,
-)
+from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen.canvas import Canvas
 
 from app.core import qr
@@ -52,14 +59,21 @@ from app.core.models import Branding, EsimRecord
 rl_config.useA85 = 0  # write binary (Flate-only) streams; see module docstring
 
 FONT_DIR: Path = Path(__file__).parent / "assets" / "fonts"
-FONT_REGULAR = "DejaVuSans"
-FONT_BOLD = "DejaVuSans-Bold"
+FIXED_FONT = "Helvetica"  # PDF standard font, never embedded
+FIXED_FONT_BOLD = "Helvetica-Bold"
+UNICODE_FONT = "DejaVuSans"  # embedded subset, only for non-ASCII user text
+
+COMPANY_SIZE = 20  # user text sizes; user text is never bold
+VALUE_SIZE = 13
+FOOTER_SIZE = 8
 
 QR_SIZE = 6 * cm  # including the quiet zone
 QR_BORDER = 2  # quiet zone, in modules
 MARGIN = 2 * cm
 LOGO_MAX_WIDTH = 5 * cm
 LOGO_MAX_HEIGHT = 2 * cm
+LOGO_DPI = 300  # the logo is downscaled to this resolution at its printed size
+LOGO_JPEG_QUALITY = 90
 TEXT_GREY = HexColor("#444444")
 CONFIRMATION_NOTE = "A confirmation code will be sent separately."
 
@@ -87,18 +101,64 @@ _UNSAFE_FILENAME = re.compile(r"[^0-9A-Za-z]")
 _DARK_RUN = re.compile(rb"\x01+")
 _LOGO_NAME = "Logo"
 _LOGO_MASK_NAME = "LogoMask"
-_SUBSET_CACHE_SIZE = 64  # per font; one entry is ~20 KB
+_LOGO_FORMATS = ("PNG", "JPEG")
 _font_lock = threading.Lock()
 _fonts_ready = False
+# ReportLab's TrueType face keeps one shared read position, which ``makeSubset``
+# moves while it builds a PDF's embedded subset (in ``Canvas.save``). Saves of
+# PDFs that embed the font are serialised so concurrent renders cannot interleave.
+_embed_lock = threading.Lock()
+
+
+@dataclass(frozen=True, slots=True)
+class _EncodedImage:
+    """One image stream, encoded once per batch (``prepare_branding``)."""
+
+    name: str
+    width: int  # pixels
+    height: int
+    colour_space: str  # DeviceRGB or DeviceGray
+    filter: str  # FlateDecode (PNG data) or DCTDecode (JPEG data)
+    data: bytes
+    columns_colors: tuple[int, int] | None  # PNG predictor parameters, for FlateDecode
+    smask: str | None = None  # name of the soft-mask image
+
+
+class _ImageXObject(pdfdoc.PDFObject):
+    """Writes a pre-encoded image. ReportLab stamps each registered object with its
+    name in that document, so every PDF gets its own (tiny) instance."""
+
+    def __init__(self, image: _EncodedImage) -> None:
+        self.image = image
+
+    def format(self, document) -> bytes:
+        img = self.image
+        entries = {
+            "Type": pdfdoc.PDFName("XObject"),
+            "Subtype": pdfdoc.PDFName("Image"),
+            "Width": img.width,
+            "Height": img.height,
+            "BitsPerComponent": 8,
+            "ColorSpace": pdfdoc.PDFName(img.colour_space),
+            "Filter": pdfdoc.PDFName(img.filter),  # preset: PDFStream will not re-encode
+        }
+        if img.columns_colors is not None:
+            columns, colors = img.columns_colors
+            entries["DecodeParms"] = pdfdoc.PDFDictionary(
+                {"Predictor": 15, "Colors": colors, "BitsPerComponent": 8, "Columns": columns}
+            )
+        if img.smask is not None:
+            entries["SMask"] = pdfdoc.PDFObjectReference(pdfdoc.xObjectName(img.smask))
+        return pdfdoc.PDFStream(pdfdoc.PDFDictionary(entries), img.data).format(document)
 
 
 @dataclass(frozen=True, slots=True)
 class _Logo:
-    """Logo decoded and compressed once; copied (cheaply) into each PDF."""
+    """Logo encoded once; its bytes are shared by every PDF of the batch."""
 
-    image: pdfdoc.PDFImageXObject
-    smask: pdfdoc.PDFImageXObject | None
-    width: float
+    image: _EncodedImage
+    smask: _EncodedImage | None
+    width: float  # points, as drawn
     height: float
 
 
@@ -111,139 +171,22 @@ class PreparedBranding:
     logo: _Logo | None
 
 
-class _Preformatted(pdfdoc.PDFObject):
-    """A PDF value whose bytes were formatted once and are reused verbatim."""
-
-    __slots__ = ("data",)
-
-    def __init__(self, data: bytes) -> None:
-        self.data = data
-
-    def format(self, document) -> bytes:
-        return self.data
-
-
-@dataclass(frozen=True, slots=True)
-class _SubsetPdf:
-    """The parts of one embedded font subset that are the same in every PDF."""
-
-    widths: _Preformatted
-    to_unicode: bytes  # Flate-compressed ToUnicode CMap
-    font_file: bytes  # Flate-compressed TrueType subset program
-    font_file_length: int  # uncompressed length (/Length1)
-
-
-def _flate_stream(packed: bytes) -> pdfdoc.PDFStream:
-    """A stream whose content is already Flate-compressed (preset /Filter skips encoding)."""
-    stream = pdfdoc.PDFStream(content=packed)
-    stream.dictionary["Filter"] = pdfdoc.PDFArray([pdfdoc.PDFName("FlateDecode")])
-    return stream
-
-
-class _CachingTTFont(TTFont):
-    """``TTFont`` that builds each distinct embedded subset once and reuses it.
-
-    Every PDF embeds its own font subsets. Building one (``makeSubset``),
-    compressing it and formatting its widths costs several ms, and the result
-    depends only on the subset's character list. That list repeats across
-    PDFs: ReportLab always puts ASCII in subset 0, so only non-ASCII characters
-    (in first-use order) make subsets differ. ``addObjects`` mirrors ReportLab
-    5.1 ``TTFont.addObjects``/``TTFontFace.addSubsetObjects`` and produces
-    byte-identical PDFs. Entries hold glyph data only, in a bounded LRU cache.
-    """
-
-    def __init__(self, name: str, filename: str) -> None:
-        super().__init__(name, filename)
-        self._subsets: OrderedDict[tuple[int, tuple[int, ...]], _SubsetPdf] = OrderedDict()
-        self._subsets_lock = threading.Lock()
-
-    def _subset_pdf(self, n: int, base_font_name: str, subset: list[int], doc) -> _SubsetPdf:
-        key = (n, tuple(subset))  # n fixes base_font_name (subset prefix + face name)
-        with self._subsets_lock:
-            hit = self._subsets.get(key)
-            if hit is not None:
-                self._subsets.move_to_end(key)
-                return hit
-        face = self.face
-        widths = pdfdoc.PDFArray(list(map(face.getCharWidth, subset))).format(doc)
-        program = face.makeSubset(subset)
-        hit = _SubsetPdf(
-            widths=_Preformatted(widths),
-            # zlib.compress with default level, as ReportLab's PDFZCompress does.
-            to_unicode=zlib.compress(makeToUnicodeCMap(base_font_name, subset).encode("utf8")),
-            font_file=zlib.compress(program),
-            font_file_length=len(program),
-        )
-        with self._subsets_lock:
-            self._subsets[key] = hit
-            while len(self._subsets) > _SUBSET_CACHE_SIZE:
-                self._subsets.popitem(last=False)
-        return hit
-
-    def addObjects(self, doc) -> None:  # noqa: N802 (ReportLab API)
-        if not doc.compression:
-            return super().addObjects(doc)
-        state = self.state.get(doc) or TTFont.State(self._asciiReadable)
-        self.state[doc] = state
-        state.frozen = 1
-        face = self.face
-        for n, subset in enumerate(state.subsets):
-            internal_name = self.getSubsetInternalName(n, doc)[1:]
-            base_font_name = b"".join((SUBSETN(n), b"+", face.name, face.subfontNameX)).decode(
-                "pdfdoc"
-            )
-            cached = self._subset_pdf(n, base_font_name, subset, doc)
-            # Register objects in ReportLab's order, so object numbers match.
-            to_unicode_ref = doc.Reference(
-                _flate_stream(cached.to_unicode), "toUnicodeCMap:" + base_font_name
-            )
-            font_file = _flate_stream(cached.font_file)
-            font_file.dictionary["Length1"] = cached.font_file_length
-            font_file_ref = doc.Reference(font_file, f"fontFile:{face.filename}({base_font_name})")
-            descriptor = pdfdoc.PDFDictionary(
-                {
-                    "Type": "/FontDescriptor",
-                    "Ascent": face.ascent,
-                    "CapHeight": face.capHeight,
-                    "Descent": face.descent,
-                    "Flags": (face.flags & ~FF_NONSYMBOLIC) | FF_SYMBOLIC,
-                    "FontBBox": pdfdoc.PDFArray(face.bbox),
-                    "FontName": pdfdoc.PDFName(base_font_name),
-                    "ItalicAngle": face.italicAngle,
-                    "StemV": face.stemV,
-                    "FontFile2": font_file_ref,
-                    "MissingWidth": face.defaultWidth,
-                }
-            )
-
-            pdf_font = pdfdoc.PDFTrueTypeFont()
-            pdf_font.__Comment__ = f"Font {self.fontName} subset {n}"
-            pdf_font.Name = internal_name
-            pdf_font.BaseFont = base_font_name
-            pdf_font.FirstChar = 0
-            pdf_font.LastChar = len(subset) - 1
-            pdf_font.Widths = cached.widths
-            pdf_font.ToUnicode = to_unicode_ref
-            pdf_font.FontDescriptor = doc.Reference(descriptor, "fontDescriptor:" + base_font_name)
-            doc.Reference(pdf_font, internal_name)
-            doc.idToObject["BasicFonts"].dict[internal_name] = pdf_font
-        del self.state[doc]
-
-
 def register_fonts() -> None:
-    """Register the bundled DejaVu TTFs with ReportLab. Safe to call more than once."""
+    """Register the bundled DejaVu Sans with ReportLab. Safe to call more than once."""
     global _fonts_ready
     if _fonts_ready:
         return
     with _font_lock:
-        registered = set(pdfmetrics.getRegisteredFontNames())
-        for name, filename in (
-            (FONT_REGULAR, "DejaVuSans.ttf"),
-            (FONT_BOLD, "DejaVuSans-Bold.ttf"),
-        ):
-            if name not in registered:
-                pdfmetrics.registerFont(_CachingTTFont(name, str(FONT_DIR / filename)))
+        if UNICODE_FONT not in pdfmetrics.getRegisteredFontNames():
+            pdfmetrics.registerFont(TTFont(UNICODE_FONT, str(FONT_DIR / "DejaVuSans.ttf")))
+        for name in (FIXED_FONT, FIXED_FONT_BOLD):
+            pdfmetrics.getFont(name)  # load the standard font metrics up front
         _fonts_ready = True
+
+
+def user_font(text: str) -> str:
+    """Font for user-supplied text: Helvetica if pure ASCII, else embedded DejaVu Sans."""
+    return FIXED_FONT if text.isascii() else UNICODE_FONT
 
 
 def primary_color(value: str | None) -> Color:
@@ -257,7 +200,7 @@ def primary_color(value: str | None) -> Color:
 
 
 def prepare_branding(branding: Branding) -> PreparedBranding:
-    """Do the per-batch work once: register fonts, parse the colour, decode the logo."""
+    """Do the per-batch work once: register fonts, parse the colour, encode the logo."""
     register_fonts()
     return PreparedBranding(branding, primary_color(branding.primary_hex), _logo(branding.logo_png))
 
@@ -274,6 +217,14 @@ def render_pdf(record: EsimRecord, branding: Branding | PreparedBranding) -> byt
     primary = prepared.primary
     width, height = A4
     content_width = width - 2 * MARGIN
+    embeds_font = False  # set when any user string needs DejaVu Sans
+
+    def set_user_font(text: str, size: float) -> str:
+        nonlocal embeds_font
+        font = user_font(text)
+        embeds_font = embeds_font or font == UNICODE_FONT
+        canvas.setFont(font, size)
+        return font
 
     buf = io.BytesIO()
     canvas = Canvas(buf, pagesize=A4, invariant=True)
@@ -291,12 +242,13 @@ def render_pdf(record: EsimRecord, branding: Branding | PreparedBranding) -> byt
         text_x += logo.width + 0.6 * cm
         header_bottom = top - logo.height
     canvas.setFillColor(primary)
-    canvas.setFont(FONT_BOLD, 18)
-    baseline = top - 18
-    for line in simpleSplit(branding.company_name, FONT_BOLD, 18, width - MARGIN - text_x)[:2]:
+    font = set_user_font(branding.company_name, COMPANY_SIZE)
+    baseline = top - COMPANY_SIZE
+    name_width = width - MARGIN - text_x
+    for line in simpleSplit(branding.company_name, font, COMPANY_SIZE, name_width)[:2]:
         canvas.drawString(text_x, baseline, line)
         header_bottom = min(header_bottom, baseline - 6)
-        baseline -= 22
+        baseline -= COMPANY_SIZE + 4
     y = header_bottom - 0.4 * cm
 
     canvas.setStrokeColor(primary)
@@ -305,7 +257,7 @@ def render_pdf(record: EsimRecord, branding: Branding | PreparedBranding) -> byt
     y -= 1 * cm
 
     # --- title and details ---
-    canvas.setFont(FONT_BOLD, 16)
+    canvas.setFont(FIXED_FONT_BOLD, 16)
     canvas.drawString(MARGIN, y, "Your eSIM")
     y -= 0.8 * cm
     details = [
@@ -318,13 +270,13 @@ def render_pdf(record: EsimRecord, branding: Branding | PreparedBranding) -> byt
         if not value:
             continue
         canvas.setFillColor(TEXT_GREY)
-        canvas.setFont(FONT_REGULAR, 10)
+        canvas.setFont(FIXED_FONT, 10)
         canvas.drawString(MARGIN, y, label)
         canvas.setFillColor(black)
-        canvas.setFont(FONT_BOLD, 12)
-        for line in simpleSplit(value, FONT_BOLD, 12, content_width - label_width):
+        font = set_user_font(value, VALUE_SIZE)
+        for line in simpleSplit(value, font, VALUE_SIZE, content_width - label_width):
             canvas.drawString(MARGIN + label_width, y, line)
-            y -= 16
+            y -= VALUE_SIZE + 4
         y -= 4
 
     # --- QR code (activation code only) ---
@@ -332,48 +284,52 @@ def render_pdf(record: EsimRecord, branding: Branding | PreparedBranding) -> byt
     _draw_qr(canvas, qr.make_qr_matrix(record.activation_code), (width - QR_SIZE) / 2, y - QR_SIZE)
     y -= QR_SIZE + 0.6 * cm
     canvas.setFillColor(black)
-    canvas.setFont(FONT_REGULAR, 10)
+    canvas.setFont(FIXED_FONT, 10)
     canvas.drawCentredString(width / 2, y, "Scan this QR code with the phone you want to use.")
     if record.confirmation_code:
         y -= 0.55 * cm
-        canvas.setFont(FONT_BOLD, 10)
+        canvas.setFont(FIXED_FONT_BOLD, 10)
         canvas.drawCentredString(width / 2, y, CONFIRMATION_NOTE)
     y -= 1.1 * cm
 
     # --- install steps ---
     canvas.setFillColor(primary)
-    canvas.setFont(FONT_BOLD, 14)
+    canvas.setFont(FIXED_FONT_BOLD, 14)
     canvas.drawString(MARGIN, y, "How to install")
     y -= 0.7 * cm
-    for platform, steps in INSTALL_STEPS:
+    for platform, steps in _wrapped_install_steps(content_width - 1 * cm):
         canvas.setFillColor(primary)
-        canvas.setFont(FONT_BOLD, 11)
+        canvas.setFont(FIXED_FONT_BOLD, 11)
         canvas.drawString(MARGIN, y, platform)
         y -= 15
         canvas.setFillColor(black)
-        canvas.setFont(FONT_REGULAR, 10)
-        for number, step in enumerate(steps, start=1):
+        canvas.setFont(FIXED_FONT, 10)
+        for number, lines in enumerate(steps, start=1):
             canvas.drawString(MARGIN + 0.3 * cm, y, f"{number}.")
-            for line in simpleSplit(step, FONT_REGULAR, 10, content_width - 1 * cm):
+            for line in lines:
                 canvas.drawString(MARGIN + 1 * cm, y, line)
                 y -= 13
         y -= 8
 
     # --- footer ---
     if branding.footer_text:
-        lines = simpleSplit(branding.footer_text, FONT_REGULAR, 8, content_width)[:4]
+        font = set_user_font(branding.footer_text, FOOTER_SIZE)
+        lines = simpleSplit(branding.footer_text, font, FOOTER_SIZE, content_width)[:4]
         footer_y = MARGIN + (len(lines) - 1) * 10
         canvas.setStrokeColor(TEXT_GREY)
         canvas.setLineWidth(0.5)
         canvas.line(MARGIN, footer_y + 14, width - MARGIN, footer_y + 14)
         canvas.setFillColor(TEXT_GREY)
-        canvas.setFont(FONT_REGULAR, 8)
         for line in lines:
             canvas.drawCentredString(width / 2, footer_y, line)
             footer_y -= 10
 
     canvas.showPage()
-    canvas.save()
+    if embeds_font:
+        with _embed_lock:
+            canvas.save()
+    else:
+        canvas.save()
     return buf.getvalue()
 
 
@@ -384,6 +340,17 @@ def pdf_filename(record: EsimRecord) -> str:
     other than ASCII letters and digits are replaced with ``_``.
     """
     return f"esim_{_UNSAFE_FILENAME.sub('_', record.iccid)}.pdf"
+
+
+@functools.cache
+def _wrapped_install_steps(
+    max_width: float,
+) -> tuple[tuple[str, tuple[tuple[str, ...], ...]], ...]:
+    """``INSTALL_STEPS`` with each step wrapped to ``max_width``; fixed text, wrapped once."""
+    return tuple(
+        (platform, tuple(tuple(simpleSplit(step, FIXED_FONT, 10, max_width)) for step in steps))
+        for platform, steps in INSTALL_STEPS
+    )
 
 
 def _draw_qr(canvas: Canvas, matrix: tuple[bytes, ...], x: float, y: float) -> None:
@@ -409,15 +376,11 @@ def _draw_qr(canvas: Canvas, matrix: tuple[bytes, ...], x: float, y: float) -> N
 
 
 def _draw_logo(canvas: Canvas, logo: _Logo, x: float, y: float) -> None:
-    """Draw the prepared logo, as ``Canvas.drawImage`` would, without re-encoding it.
-
-    ReportLab stamps an object with its name in the document it is registered
-    in, so each PDF gets a shallow copy (the compressed image bytes are shared).
-    """
+    """Draw the prepared logo, as ``Canvas.drawImage`` would, without re-encoding it."""
     doc = canvas._doc
-    for obj in (logo.image, logo.smask):
-        if obj is not None:
-            doc.Reference(copy.copy(obj), doc.getXObjectName(obj.name))
+    for image in (logo.image, logo.smask):
+        if image is not None:
+            doc.Reference(_ImageXObject(image), doc.getXObjectName(image.name))
     canvas.saveState()
     canvas.transform(logo.width, 0, 0, logo.height, x, y)
     canvas.doForm(logo.image.name)
@@ -426,22 +389,99 @@ def _draw_logo(canvas: Canvas, logo: _Logo, x: float, y: float) -> None:
 
 
 def _logo(data: bytes | None) -> _Logo | None:
-    """Decode the logo once and scale it to the header box; ``None`` if absent or unreadable."""
+    """Decode, downscale and encode the logo once; ``None`` if absent or unreadable.
+
+    The drawn size fits the logo in ``LOGO_MAX_WIDTH`` x ``LOGO_MAX_HEIGHT``. The
+    pixels are reduced (never enlarged) to what that size needs at ``LOGO_DPI``.
+    """
     if not data:
         return None
     try:
-        reader = ImageReader(io.BytesIO(data))
-        px_w, px_h = reader.getSize()
-        if px_w <= 0 or px_h <= 0:
-            return None
-        # Same encoding (and transparency handling) as Canvas.drawImage(mask="auto").
-        image = pdfdoc.PDFImageXObject(_LOGO_NAME, reader, mask="auto")
+        with Image.open(io.BytesIO(data), formats=_LOGO_FORMATS) as source:
+            px_w, px_h = source.size
+            if px_w <= 0 or px_h <= 0:
+                return None
+            scale = min(LOGO_MAX_WIDTH / px_w, LOGO_MAX_HEIGHT / px_h)  # points per pixel
+            colour, alpha = _logo_pixels(source, min(1.0, scale * LOGO_DPI / 72))
+        smask = _encode_lossless(_LOGO_MASK_NAME, alpha) if alpha is not None else None
+        image = _encode_smallest(colour, smask.name if smask is not None else None)
     except Exception:
         return None
-    smask = getattr(image, "_smask", None)
-    if smask is not None:
-        del image._smask
-        smask.name = _LOGO_MASK_NAME
-        image.smask = pdfdoc.PDFObjectReference(pdfdoc.xObjectName(_LOGO_MASK_NAME))
-    scale = min(LOGO_MAX_WIDTH / px_w, LOGO_MAX_HEIGHT / px_h)
     return _Logo(image, smask, px_w * scale, px_h * scale)
+
+
+def _logo_pixels(source: Image.Image, ratio: float) -> tuple[Image.Image, Image.Image | None]:
+    """Return the 8-bit colour (RGB or L) and alpha (L, or ``None`` if opaque) images,
+    resized by ``ratio`` (<= 1)."""
+    grey = source.mode in ("1", "L", "LA")
+    has_alpha = source.mode in ("LA", "RGBA", "PA") or "transparency" in source.info
+    if has_alpha:
+        image = source.convert("RGBA")  # applies palette / colour-key transparency
+        if grey:
+            image = image.convert("LA")
+    else:
+        image = source.convert("L" if grey else "RGB")
+    size = (max(1, round(image.width * ratio)), max(1, round(image.height * ratio)))
+    if size != image.size:
+        # Area averaging (box filter): no ringing at the hard edges logos have, so
+        # it adds the fewest new colours and compresses far better than Lanczos.
+        # Pillow premultiplies alpha while resizing RGBA/LA.
+        image = image.resize(size, Image.Resampling.BOX)
+    if not has_alpha:
+        return image, None
+    alpha = image.getchannel("A")
+    colour = image.convert("L" if grey else "RGB")
+    return colour, (None if alpha.getextrema() == (255, 255) else alpha)
+
+
+def _encode_smallest(image: Image.Image, smask: str | None) -> _EncodedImage:
+    """Encode ``image`` as PNG and as JPEG and keep the smaller (PNG on a tie)."""
+    png = _encode_lossless(_LOGO_NAME, image, smask)
+    out = io.BytesIO()
+    image.save(out, "JPEG", quality=LOGO_JPEG_QUALITY, optimize=True, subsampling=0)
+    jpeg = out.getvalue()
+    if len(jpeg) >= len(png.data):
+        return png
+    return _EncodedImage(
+        name=_LOGO_NAME,
+        width=image.width,
+        height=image.height,
+        colour_space=png.colour_space,
+        filter="DCTDecode",
+        data=jpeg,
+        columns_colors=None,
+        smask=smask,
+    )
+
+
+def _encode_lossless(name: str, image: Image.Image, smask: str | None = None) -> _EncodedImage:
+    """Encode an 8-bit RGB or L image as PNG and embed its IDAT data.
+
+    A PNG's IDAT data is a Flate stream of predictor-filtered rows, which a PDF
+    reads directly with ``/DecodeParms << /Predictor 15 ... >>``.
+    """
+    out = io.BytesIO()
+    image.save(out, "PNG", optimize=True)  # Pillow never interlaces on save
+    colors = 3 if image.mode == "RGB" else 1
+    return _EncodedImage(
+        name=name,
+        width=image.width,
+        height=image.height,
+        colour_space="DeviceRGB" if colors == 3 else "DeviceGray",
+        filter="FlateDecode",
+        data=_png_idat(out.getvalue()),
+        columns_colors=(image.width, colors),
+        smask=smask,
+    )
+
+
+def _png_idat(png: bytes) -> bytes:
+    """Concatenated IDAT chunk data of a PNG file (8-byte signature, then chunks)."""
+    parts: list[bytes] = []
+    pos = 8
+    while pos + 8 <= len(png):
+        length, kind = struct.unpack(">I4s", png[pos : pos + 8])
+        if kind == b"IDAT":
+            parts.append(png[pos + 8 : pos + 8 + length])
+        pos += 12 + length  # length, type, data, CRC
+    return b"".join(parts)
