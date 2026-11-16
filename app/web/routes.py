@@ -5,6 +5,10 @@ per-part caps (``read_capped``) and dropped when the response is sent. Uploads
 never go to disk. Starlette's own form parser is not used because it spools
 file parts over 1 MB to a temporary file.
 
+Large orders are generated in parts of ``GENERATE_CHUNK_ROWS`` rows. The page
+asks for one part at a time and sends the whole file with every request; the
+server keeps nothing between requests.
+
 Never log request bodies, uploaded filenames, or cell values.
 """
 
@@ -29,10 +33,10 @@ from fastapi.templating import Jinja2Templates
 from python_multipart.exceptions import FormParserError
 from python_multipart.multipart import MultipartParser, parse_options_header
 
+from app.core import pipeline
 from app.core.models import Branding, ParseError, ValidationReport
-from app.core.parser import MAX_ROWS, SUPPORTED_EXTENSIONS, parse_upload
-from app.core.pipeline import process_upload
-from app.core.validator import validate
+from app.core.parser import MAX_ROWS, SUPPORTED_EXTENSIONS
+from app.core.pipeline import PartError, check_upload, process_upload
 
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024
 MAX_LOGO_BYTES = 500 * 1024
@@ -58,13 +62,14 @@ MAX_CONCURRENT_JOBS = 2
 JOB_WAIT_SECONDS = 5.0
 BUSY_RETRY_AFTER_SECONDS = 60
 
-# Echoed back as a cookie when the ZIP is ready so the page can hide its
-# "Generating" message (a download does not navigate away). Random, not data.
-DOWNLOAD_COOKIE = "esim_download"
-DOWNLOAD_COOKIE_MAX_AGE = 60
-_DOWNLOAD_TOKEN = re.compile(r"[0-9a-f]{16,64}")
+MAX_ISSUES_SHOWN = 200  # rows of the issue table; the summary always counts them all
+_PART_NUMBER = re.compile(r"[0-9]{1,4}")  # ASCII digits only
 
 _HEX_COLOUR = re.compile(r"#[0-9a-fA-F]{6}")
+# The browser's local date and time as DDMMYYYY_HHMM, used in the ZIP filename.
+# ASCII digits only: the value goes into a response header.
+_CLIENT_STAMP = re.compile(r"[0-9]{8}_[0-9]{4}")
+STAMP_FORMAT = "%d%m%Y_%H%M"
 
 TEMPLATES_DIR: Path = Path(__file__).parent / "templates"
 DEFAULT_LOGO_PATH: Path = Path(__file__).parent / "static" / "brand" / "logo.png"
@@ -90,6 +95,9 @@ MSG_LOGO_DIMENSIONS = (
     f"The logo can be at most {MAX_LOGO_SIDE_PX} x {MAX_LOGO_SIDE_PX} pixels. Use a smaller image."
 )
 MSG_BUSY = "Server busy, try again in a minute."
+MSG_BAD_PART = (
+    "The requested part does not match this file. Choose the file again and restart the download."
+)
 MSG_COMPANY_MISSING = "Enter a company name."
 MSG_COMPANY_LONG = f"The company name can be at most {MAX_COMPANY_CHARS} characters."
 MSG_FOOTER_LONG = f"The footer text can be at most {MAX_FOOTER_CHARS} characters."
@@ -127,10 +135,15 @@ class UploadForm:
 
 @dataclass(frozen=True, slots=True)
 class Results:
-    """What the results partial shows: a row count and the validation report."""
+    """What the results partial shows: row count, number of parts, validation report."""
 
     row_count: int
     report: ValidationReport
+
+    @property
+    def parts(self) -> int:
+        """How many ZIP files (parts of ``GENERATE_CHUNK_ROWS`` rows) the upload needs."""
+        return pipeline.part_count(self.row_count)
 
 
 @lru_cache(maxsize=1)
@@ -385,12 +398,38 @@ def _jpeg_dimensions(data: bytes) -> tuple[int, int] | None:
     return (width, height) if width and height else None
 
 
+def _batch_stamp(form: UploadForm) -> str:
+    """The client's local ``DDMMYYYY_HHMM`` stamp if well-formed, else the current UTC time."""
+    stamp = form.fields.get("client_stamp", "")
+    if _CLIENT_STAMP.fullmatch(stamp):
+        return stamp
+    return datetime.now(UTC).strftime(STAMP_FORMAT)
+
+
+def _part_number(form: UploadForm, field: str) -> int:
+    """A part field as an integer; 1 when absent. Raises ``UploadRejected`` (400)."""
+    value = form.fields.get(field)
+    if value is None:
+        return 1
+    if not _PART_NUMBER.fullmatch(value):
+        raise UploadRejected(400, MSG_BAD_PART)
+    return int(value)
+
+
+def _zip_filename(stamp: str, part: int, parts: int) -> str:
+    """``esim_batch_<stamp>.zip``, with ``_partNNofMM`` when there is more than one part."""
+    if parts == 1:
+        return f"esim_batch_{stamp}.zip"
+    width = max(2, len(str(parts)))
+    return f"esim_batch_{stamp}_part{part:0{width}d}of{parts:0{width}d}.zip"
+
+
 def _check(upload: UploadedFile) -> Results:
     """Parse and validate only. Raises ``ParseError``."""
-    records = parse_upload(upload.data, upload.filename)
-    if not records:
+    parsed, report = check_upload(upload.data, upload.filename)
+    if not parsed.records:
         raise ParseError(MSG_NO_ROWS)
-    return Results(row_count=len(records), report=validate(records))
+    return Results(row_count=len(parsed.records), report=report)
 
 
 def _row_count(report: ValidationReport) -> int:
@@ -418,6 +457,8 @@ def _context(**extra: Any) -> dict[str, Any]:
         "max_logo_bytes": MAX_LOGO_BYTES,
         "max_logo_kb": MAX_LOGO_BYTES // 1024,
         "max_rows": MAX_ROWS,
+        "chunk_rows": pipeline.GENERATE_CHUNK_ROWS,
+        "max_issues_shown": MAX_ISSUES_SHOWN,
         "max_company_chars": MAX_COMPANY_CHARS,
         "max_footer_chars": MAX_FOOTER_CHARS,
         "error": None,
@@ -503,11 +544,16 @@ async def validate_upload(request: Request) -> HTMLResponse:
 async def generate(
     request: Request, defaults: Annotated[Branding, Depends(get_branding)]
 ) -> Response:
-    """POST /generate (plain form submit): run the whole pipeline.
+    """POST /generate: validate the whole upload, then build the ZIP for one part of it.
 
-    Returns the ZIP when every row is valid, otherwise the full page with the
-    results table (422), the reason the upload was rejected (400/413), or a
-    busy message (503) when no job slot frees up within ``JOB_WAIT_SECONDS``.
+    The form fields ``part`` (1-based) and ``parts`` say which part; both default
+    to 1, which is right for uploads of up to ``GENERATE_CHUNK_ROWS`` rows. The
+    page's script requests the parts one after another.
+
+    Returns the ZIP when every row of the upload is valid, otherwise the full
+    page with the results table (422), the reason the request was rejected
+    (400/413, including a part that does not match the file), or a busy message
+    (503) when no job slot frees up within ``JOB_WAIT_SECONDS``.
 
     The pipeline runs in a worker thread. The slot is held until that thread
     finishes, even if the client disconnects: the thread call is not abandoned
@@ -518,6 +564,7 @@ async def generate(
         form = await read_capped(request)
         form_values = _form_values(defaults, form)
         upload = _data_file(form)
+        part, parts = _part_number(form, "part"), _part_number(form, "parts")
         branding = _branding(form, defaults)
     except UploadRejected as exc:
         return _page(request, form_values, exc.status_code, error=exc.message)
@@ -529,10 +576,12 @@ async def generate(
         return _page(request, form_values, 503, error=MSG_BUSY)
     try:
         report, archive = await run_in_threadpool(
-            process_upload, upload.data, upload.filename, branding
+            process_upload, upload.data, upload.filename, branding, part=part, parts=parts
         )
     except ParseError as exc:
         return _page(request, form_values, 422, error=str(exc))
+    except PartError:
+        return _page(request, form_values, 400, error=MSG_BAD_PART)
     finally:
         slots.release()
     if archive is None:
@@ -541,22 +590,12 @@ async def generate(
     if not report.valid:
         return _page(request, form_values, 422, error=MSG_NO_ROWS)
 
-    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    response = Response(
+    filename = _zip_filename(_batch_stamp(form), part, parts)
+    return Response(
         content=archive,
         media_type="application/zip",
         headers={
-            "Content-Disposition": f'attachment; filename="esim_batch_{stamp}.zip"',
+            "Content-Disposition": f'attachment; filename="{filename}"',
             "Cache-Control": "no-store",
         },
     )
-    token = form.fields.get("download_token", "")
-    if _DOWNLOAD_TOKEN.fullmatch(token):
-        response.set_cookie(
-            DOWNLOAD_COOKIE,
-            token,
-            max_age=DOWNLOAD_COOKIE_MAX_AGE,
-            path="/",
-            samesite="strict",
-        )
-    return response

@@ -1,0 +1,6 @@
+iccid,activation_code,confirmation_code,customer_name,plan_name,Email
+8999000000000003017,LPA:1$smdp.example.invalid$TEST-0301-AAAA-BBBB,CONF0301,Μαρία Παπαδοπούλου,Ταξίδι 10GB,maria.p@example.invalid
+8999000000000003025,LPA:1$smdp.example.invalid$TEST-0302-AAAA-BBBB,,Γιώργος Νικολάου,Ταξίδι 10GB,  Giorgos.N@Mail.Example.INVALID 
+8999000000000003033,LPA:1$smdp.example.invalid$TEST-0303-AAAA-BBBB,,Ελένη Δημητρίου,Ευρώπη 5GB,eleni.example.invalid
+8999000000000003041,LPA:1$smdp.example.invalid$TEST-0304-AAAA-BBBB,CONF0304,Νίκος Αθανασίου,Ευρώπη 5GB,
+8999000000000003058,LPA:1$smdp.example.invalid$TEST-0305-AAAA-BBBB,,Μαρία Παπαδοπούλου,Ευρώπη 5GB,maria.p@example.invalid

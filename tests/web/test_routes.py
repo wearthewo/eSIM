@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import importlib.util
 import io
 import re
 import struct
@@ -10,6 +11,8 @@ import threading
 import zipfile
 import zlib
 from collections.abc import Iterator
+from datetime import UTC, datetime
+from pathlib import Path
 
 import httpx
 import pytest
@@ -17,11 +20,13 @@ import starlette.formparsers
 from fastapi.testclient import TestClient
 from PIL import Image
 
-from app.core import zipper
+from app.core import parser, pipeline, zipper
 from app.core.models import Branding
 from app.web import routes
 from app.web.main import SECURITY_HEADERS, create_app
 from tests.conftest import FIXTURES_DIR, OVERSIZE_CAP_BYTES, synthetic_csv, synthetic_iccid
+from tests.core.test_email import MISSING_EMAIL_MESSAGE
+from tests.core.test_email import _valid_fixture as valid_emails_csv
 
 FORM = {
     "company_name": "Example Telecom (test)",
@@ -48,6 +53,12 @@ def _image(fmt: str, size: tuple[int, int] = (8, 4), **save: object) -> bytes:
 
 def _csv_file(name: str, data: bytes) -> dict[str, tuple[str, bytes, str]]:
     return {"file": (name, data, "text/csv")}
+
+
+def _zip_name(response) -> str:
+    match = re.fullmatch(r'attachment; filename="([^"]+)"', response.headers["content-disposition"])
+    assert match, response.headers["content-disposition"]
+    return match.group(1)
 
 
 def _assert_security_headers(response) -> None:
@@ -166,7 +177,12 @@ def test_index_renders(client: TestClient) -> None:
     assert 'action="/generate"' in html
     assert 'hx-post="/validate"' in html
     assert "processed in memory and never stored" in html
-    assert "Generating, this can take up to 30 seconds for 500 rows" in html
+    for element in ('id="progress"', 'id="generating"', 'id="cancel"', 'id="retry"'):
+        assert element in html
+    for hidden in ("client_stamp", "part", "parts"):
+        assert f'type="hidden" name="{hidden}"' in html
+    assert "download_token" not in html
+    assert "10000 rows" in html and "parts of 500" in html
     assert 'id="download"' not in html  # only after a successful validation
 
 
@@ -338,11 +354,8 @@ def test_generate_returns_zip(client: TestClient, fixture_bytes) -> None:
     _assert_security_headers(response)
     assert response.headers["content-type"] == "application/zip"
     assert response.headers["cache-control"] == "no-store"
-    assert re.fullmatch(
-        r'attachment; filename="esim_batch_\d{8}T\d{6}Z\.zip"',
-        response.headers["content-disposition"],
-    )
-    assert "set-cookie" not in response.headers  # no download token sent
+    assert re.fullmatch(r"esim_batch_[0-9]{8}_[0-9]{4}\.zip", _zip_name(response))
+    assert "set-cookie" not in response.headers
     pdfs = [f"esim_{iccid}.pdf" for iccid in VALID_MINIMAL_ICCIDS]
     with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
         assert zf.testzip() is None
@@ -357,6 +370,47 @@ def test_generate_returns_zip(client: TestClient, fixture_bytes) -> None:
             for row, iccid, pdf in zip((2, 3, 4), VALID_MINIMAL_ICCIDS, pdfs, strict=True)
         ],
     ]
+
+
+def test_generate_filename_uses_client_stamp(client: TestClient, fixture_bytes) -> None:
+    response = client.post(
+        "/generate",
+        data={**FORM, "client_stamp": "16112026_0935"},
+        files=_csv_file("v.csv", fixture_bytes("valid_minimal.csv")),
+    )
+    assert response.status_code == 200
+    assert _zip_name(response) == "esim_batch_16112026_0935.zip"
+
+
+@pytest.mark.parametrize(
+    "stamp",
+    [
+        None,
+        "",
+        "16112026_093",
+        "16112026_09350",
+        "161120260935",
+        "2026-11-16_0935",
+        "20261116T093500Z",
+        " 16112026_0935",
+        "16112026_0935\n",
+        '16112026_0935"; x="',
+        "../../etc_passwd",
+        "١٦١١٢٠٢٦_٠٩٣٥",  # Unicode digits are not accepted
+    ],
+)
+def test_generate_filename_falls_back_to_utc(
+    client: TestClient, fixture_bytes, stamp: str | None
+) -> None:
+    data = FORM if stamp is None else {**FORM, "client_stamp": stamp}
+    before = datetime.now(UTC)
+    response = client.post(
+        "/generate", data=data, files=_csv_file("v.csv", fixture_bytes("valid_minimal.csv"))
+    )
+    after = datetime.now(UTC)
+    assert response.status_code == 200
+    expected = {f"esim_batch_{moment:%d%m%Y_%H%M}.zip" for moment in (before, after)}
+    assert _zip_name(response) in expected
 
 
 def test_generate_xlsx_and_warnings_allowed(
@@ -490,7 +544,7 @@ def test_generate_invalid_returns_page(client: TestClient, fixture_bytes) -> Non
             "activation",
         ),
         ("header.csv", b"iccid,activation_code\n", routes.MSG_NO_ROWS),
-        ("too_many.csv", synthetic_csv(501), "Too many rows"),
+        ("too_many.csv", synthetic_csv(10_001), "Too many rows"),
     ],
 )
 def test_generate_parse_error_returns_page(
@@ -509,32 +563,6 @@ def test_generate_unsupported_and_missing_file(client: TestClient) -> None:
         "/generate", data=FORM, files={"file": ("", b"", "application/octet-stream")}
     )
     assert missing.status_code == 400 and routes.MSG_NO_FILE in missing.text
-
-
-@pytest.mark.parametrize(
-    ("token", "cookie"),
-    [
-        ("0123456789abcdef0123456789abcdef", True),
-        ("abc", False),
-        ("x; Path=/evil", False),
-        ("A" * 32, False),
-    ],
-)
-def test_generate_download_cookie(
-    client: TestClient, fixture_bytes, token: str, cookie: bool
-) -> None:
-    response = client.post(
-        "/generate",
-        data={**FORM, "download_token": token},
-        files=_csv_file("v.csv", fixture_bytes("valid_minimal.csv")),
-    )
-    assert response.status_code == 200
-    header = response.headers.get("set-cookie", "")
-    if cookie:
-        assert header.startswith(f"{routes.DOWNLOAD_COOKIE}={token};")
-        assert "Max-Age=60" in header and "SameSite=strict" in header
-    else:
-        assert header == ""
 
 
 # --- Size limits: 413 without reading the whole body ------------------------------------
@@ -873,7 +901,7 @@ class _Gate:
         self.running = 0
         self.peak = 0
 
-    def __call__(self, *args):
+    def __call__(self, *args, **kwargs):
         with self._lock:
             self.running += 1
             self.peak = max(self.peak, self.running)
@@ -881,7 +909,7 @@ class _Gate:
         try:
             if not self.release.wait(5):
                 raise AssertionError("gate never released")
-            return self.real(*args)
+            return self.real(*args, **kwargs)
         finally:
             with self._lock:
                 self.running -= 1
@@ -904,7 +932,7 @@ def _post_generate(client: httpx.AsyncClient, data: bytes):
 
 
 @pytest.mark.parametrize(
-    ("path", "target"), [("/generate", "process_upload"), ("/validate", "validate")]
+    ("path", "target"), [("/generate", "process_upload"), ("/validate", "check_upload")]
 )
 def test_pipeline_runs_off_the_event_loop(monkeypatch, fixture_bytes, path, target) -> None:
     gate = _Gate(getattr(routes, target))
@@ -979,11 +1007,11 @@ def test_job_slots_released_after_failures(monkeypatch, fixture_bytes) -> None:
     real = routes.process_upload
     calls = {"n": 0}
 
-    def flaky(*args):
+    def flaky(*args, **kwargs):
         calls["n"] += 1
         if calls["n"] <= 2:
             raise RuntimeError("synthetic failure")
-        return real(*args)
+        return real(*args, **kwargs)
 
     monkeypatch.setattr(routes, "process_upload", flaky)
     with TestClient(create_app(), raise_server_exceptions=False) as client:
@@ -999,3 +1027,284 @@ def test_job_slots_released_after_failures(monkeypatch, fixture_bytes) -> None:
             "/generate", data=FORM, files=_csv_file("v.csv", fixture_bytes("valid_minimal.csv"))
         )
         assert ok.status_code == 200
+
+
+# --- Email column and mailmerge.csv -------------------------------------------------------
+
+EMAIL_FIXTURE = "emails_greek_mixed.csv"
+EMAIL_PARTS = ("maria.p", "Giorgos.N", "eleni.example", "mail.example.invalid")
+
+
+def test_validate_email_column_shows_error_and_warning(client: TestClient, fixture_bytes) -> None:
+    response = client.post(
+        "/validate", files=_csv_file(EMAIL_FIXTURE, fixture_bytes(EMAIL_FIXTURE))
+    )
+    assert response.status_code == 200
+    html = response.text
+    assert "5 rows read: 1 error, 1 warning." in html
+    assert '<tr class="error"><td>4</td><td>email</td>' in html
+    assert f'<tr class="warning"><td>5</td><td>email</td><td>{MISSING_EMAIL_MESSAGE}</td>' in html
+    assert 'id="download"' not in html
+    assert "example.invalid" not in html  # no address is ever echoed
+    for part in EMAIL_PARTS:
+        assert part not in html
+
+
+def test_validate_missing_email_is_only_a_warning(client: TestClient) -> None:
+    response = client.post("/validate", files=_csv_file("emails.csv", valid_emails_csv()))
+    assert response.status_code == 200
+    assert "4 rows read: 0 errors, 1 warning." in response.text
+    assert 'id="download"' in response.text
+
+
+def test_generate_with_email_column_adds_mailmerge(client: TestClient) -> None:
+    response = client.post("/generate", data=FORM, files=_csv_file("e.csv", valid_emails_csv()))
+    assert response.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
+        names = zf.namelist()
+        assert names[-2:] == [zipper.MANIFEST_NAME, zipper.MAILMERGE_NAME]
+        raw = zf.read(zipper.MAILMERGE_NAME)
+    assert raw.startswith(b"\xef\xbb\xbf")
+    rows = list(csv.reader(io.StringIO(raw.decode("utf-8-sig"))))
+    assert rows[0] == list(zipper.MAILMERGE_COLUMNS)
+    assert [r[0] for r in rows[1:]] == [
+        "maria.p@example.invalid",
+        "Giorgos.N@mail.example.invalid",
+        "",
+        "maria.p@example.invalid",
+    ]
+    assert rows[1][1] == "Μαρία Παπαδοπούλου"
+    assert [r[4] for r in rows[1:]] == names[:-2]
+    for marker in ("LPA:1$", "TEST-0", "CONF0", "smdp.example.invalid"):
+        assert marker not in raw.decode("utf-8-sig")
+
+
+def test_generate_without_email_column_has_no_mailmerge(client: TestClient, fixture_bytes) -> None:
+    response = client.post(
+        "/generate", data=FORM, files=_csv_file("v.csv", fixture_bytes("valid_full.csv"))
+    )
+    with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
+        assert zipper.MAILMERGE_NAME not in zf.namelist()
+
+
+def test_generate_email_error_page_shows_no_addresses(client: TestClient, fixture_bytes) -> None:
+    form = {**FORM, "footer_text": ""}
+    response = client.post(
+        "/generate", data=form, files=_csv_file(EMAIL_FIXTURE, fixture_bytes(EMAIL_FIXTURE))
+    )
+    assert response.status_code == 422
+    html = response.text
+    assert '<tr class="error"><td>4</td><td>email</td>' in html
+    assert "example.invalid" not in html
+    for part in EMAIL_PARTS:
+        assert part not in html
+
+
+# --- Large orders: parts ------------------------------------------------------------------
+
+
+def _load_make_big_csv():
+    spec = importlib.util.spec_from_file_location(
+        "make_big_csv", Path(__file__).resolve().parents[2] / "scripts" / "make_big_csv.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _post_part(client: TestClient, data: bytes, part: object, parts: object, **extra):
+    form = {**FORM, "client_stamp": "16112026_0935", "part": str(part), "parts": str(parts)}
+    return client.post("/generate", data={**form, **extra}, files=_csv_file("order.csv", data))
+
+
+def _manifest(response) -> list[list[str]]:
+    with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
+        return list(csv.reader(io.StringIO(zf.read(zipper.MANIFEST_NAME).decode("utf-8-sig"))))
+
+
+@pytest.fixture
+def chunk_of_three(monkeypatch) -> None:
+    monkeypatch.setattr(pipeline, "GENERATE_CHUNK_ROWS", 3)
+
+
+def test_limits_shown_to_the_web_layer() -> None:
+    assert parser.MAX_ROWS == 10_000
+    assert pipeline.GENERATE_CHUNK_ROWS == 500
+    assert routes.MAX_CONCURRENT_JOBS == 2
+
+
+def test_ten_thousand_rows_with_all_columns_fit_under_the_upload_cap() -> None:
+    data = _load_make_big_csv().make_csv(parser.MAX_ROWS)
+    assert len(data) < routes.MAX_UPLOAD_BYTES
+    assert routes.MAX_UPLOAD_BYTES == 5 * 1024 * 1024
+
+
+def test_validate_ten_thousand_rows_reports_twenty_parts(client: TestClient) -> None:
+    data = _load_make_big_csv().make_csv(parser.MAX_ROWS)
+    response = client.post("/validate", files=_csv_file("big.csv", data))
+    assert response.status_code == 200
+    html = response.text
+    assert "10000 rows read: 0 errors, 0 warnings." in html
+    assert "20 parts" in html
+    assert re.search(r'<button type="submit" id="download" data-parts="20">', html)
+    assert "Download 20 ZIP files" in html
+
+
+def test_validate_single_part_file(client: TestClient, fixture_bytes) -> None:
+    html = client.post(
+        "/validate", files=_csv_file("v.csv", fixture_bytes("valid_minimal.csv"))
+    ).text
+    assert re.search(r'<button type="submit" id="download" data-parts="1">', html)
+    assert "Download ZIP" in html and "parts" not in html.replace("data-parts", "")
+
+
+@pytest.mark.parametrize(("rows", "parts"), [(500, 1), (501, 2), (1000, 2), (1001, 3)])
+def test_validate_part_count(client: TestClient, rows: int, parts: int) -> None:
+    html = client.post("/validate", files=_csv_file("v.csv", synthetic_csv(rows))).text
+    assert f"{rows} rows read: 0 errors" in html
+    assert f'data-parts="{parts}"' in html
+
+
+def test_validate_too_many_rows(client: TestClient, too_many_rows_csv: bytes) -> None:
+    response = client.post("/validate", files=_csv_file("big.csv", too_many_rows_csv))
+    assert response.status_code == 200
+    assert "Too many rows: the limit is 10000" in response.text
+    assert 'id="download"' not in response.text
+
+
+def test_validate_finds_duplicates_across_the_whole_file(client: TestClient) -> None:
+    lines = synthetic_csv(parser.MAX_ROWS).decode().splitlines()
+    lines[9000] = lines[1]  # row 9001 repeats row 2
+    data = ("\n".join(lines) + "\n").encode()
+    html = client.post("/validate", files=_csv_file("dup.csv", data)).text
+    assert "10000 rows read: 2 errors, 0 warnings." in html
+    assert (
+        '<tr class="error"><td>9001</td><td>iccid</td><td>Duplicate ICCID; first seen in row 2.'
+        in html
+    )
+    assert 'id="download"' not in html
+
+
+def test_validate_caps_the_issue_table(client: TestClient) -> None:
+    lines = synthetic_csv(700).decode().replace("LPA:1$", "NOPE$").splitlines()
+    data = ("\n".join(lines) + "\n").encode()
+    html = client.post("/validate", files=_csv_file("bad.csv", data)).text
+    assert "700 rows read: 700 errors, 0 warnings." in html
+    assert html.count('<tr class="error">') == routes.MAX_ISSUES_SHOWN
+    assert f"Showing the first {routes.MAX_ISSUES_SHOWN} of 700" in html
+
+
+@pytest.mark.parametrize(
+    ("part", "rows", "suffix"),
+    [
+        (1, ["2", "3", "4"], "part01of03"),
+        (2, ["5", "6", "7"], "part02of03"),
+        (3, ["8", "9"], "part03of03"),
+    ],
+    ids=["first", "middle", "uneven-last"],
+)
+def test_generate_part_boundaries(
+    client: TestClient, chunk_of_three, part: int, rows: list[str], suffix: str
+) -> None:
+    response = _post_part(client, synthetic_csv(8), part, 3)
+    assert response.status_code == 200
+    assert _zip_name(response) == f"esim_batch_16112026_0935_{suffix}.zip"
+    manifest = _manifest(response)
+    assert [row[0] for row in manifest[1:]] == rows
+    with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
+        assert zf.namelist() == [*[row[2] for row in manifest[1:]], zipper.MANIFEST_NAME]
+
+
+def test_generate_parts_cover_every_row_exactly_once(client: TestClient, monkeypatch) -> None:
+    monkeypatch.setattr(pipeline, "GENERATE_CHUNK_ROWS", 4)
+    data = synthetic_csv(10)
+    rows: list[str] = []
+    pdfs: list[str] = []
+    names: list[str] = []
+    for part in (1, 2, 3):
+        response = _post_part(client, data, part, 3)
+        assert response.status_code == 200
+        names.append(_zip_name(response))
+        manifest = _manifest(response)
+        rows += [row[0] for row in manifest[1:]]
+        pdfs += [row[2] for row in manifest[1:]]
+    assert rows == [str(n) for n in range(2, 12)]
+    assert len(set(pdfs)) == 10
+    assert names == [f"esim_batch_16112026_0935_part0{n}of03.zip" for n in (1, 2, 3)]
+
+
+def test_generate_single_part_has_no_suffix(client: TestClient, fixture_bytes) -> None:
+    data = fixture_bytes("valid_minimal.csv")
+    assert _zip_name(_post_part(client, data, 1, 1)) == "esim_batch_16112026_0935.zip"
+    plain = client.post(
+        "/generate", data={**FORM, "client_stamp": "16112026_0935"}, files=_csv_file("v.csv", data)
+    )
+    assert _zip_name(plain) == "esim_batch_16112026_0935.zip"
+
+
+def test_generate_part_mailmerge_covers_only_its_rows(client: TestClient, chunk_of_three) -> None:
+    lines = ["iccid,activation_code,email"] + [
+        f"{synthetic_iccid(i)},LPA:1$smdp.example.invalid$TEST-{i:04d}-AAAA-BBBB,u{i}@example.invalid"
+        for i in range(1, 8)
+    ]
+    response = _post_part(client, ("\n".join(lines) + "\n").encode(), 2, 3)
+    with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
+        rows = list(csv.reader(io.StringIO(zf.read(zipper.MAILMERGE_NAME).decode("utf-8-sig"))))
+    assert [row[0] for row in rows[1:]] == [f"u{i}@example.invalid" for i in (4, 5, 6)]
+
+
+@pytest.mark.parametrize(
+    "part", [0, 4, -1, 99, "abc", "1.5", "", " 2", "2 ", "+2", "0x2", "²", "1e0"]
+)
+def test_generate_part_index_out_of_range_is_400(client: TestClient, chunk_of_three, part) -> None:
+    response = _post_part(client, synthetic_csv(8), part, 3)
+    assert response.status_code == 400
+    assert routes.MSG_BAD_PART in response.text
+    assert "<html" in response.text
+
+
+@pytest.mark.parametrize("parts", [1, 2, 4, 20, 0, -3, "abc", "", "3.0"])
+def test_generate_part_count_mismatch_is_400(client: TestClient, chunk_of_three, parts) -> None:
+    response = _post_part(client, synthetic_csv(8), 1, parts)
+    assert response.status_code == 400
+    assert routes.MSG_BAD_PART in response.text
+
+
+def test_generate_multi_part_file_without_part_fields_is_400(
+    client: TestClient, chunk_of_three
+) -> None:
+    response = client.post("/generate", data=FORM, files=_csv_file("v.csv", synthetic_csv(8)))
+    assert response.status_code == 400
+    assert routes.MSG_BAD_PART in response.text
+
+
+def test_generate_revalidates_the_whole_file_for_each_part(
+    client: TestClient, chunk_of_three
+) -> None:
+    lines = synthetic_csv(8).decode().splitlines()
+    lines[7] = lines[1]  # row 8 (part 3) repeats row 2 (part 1)
+    data = ("\n".join(lines) + "\n").encode()
+    for part in (1, 2, 3):
+        response = _post_part(client, data, part, 3)
+        assert response.status_code == 422
+        assert '<tr class="error"><td>8</td><td>iccid</td>' in response.text
+
+
+def test_generate_real_chunk_size(client: TestClient) -> None:
+    data = synthetic_csv(1001)
+    last = _post_part(client, data, 3, 3)
+    assert last.status_code == 200
+    assert _zip_name(last) == "esim_batch_16112026_0935_part03of03.zip"
+    assert [row[0] for row in _manifest(last)[1:]] == ["1002"]
+    assert _post_part(client, data, 4, 3).status_code == 400
+    assert _post_part(client, data, 1, 2).status_code == 400
+
+
+def test_generate_rejects_bad_part_before_taking_a_job_slot(
+    client: TestClient, monkeypatch
+) -> None:
+    def never(*args, **kwargs):
+        raise AssertionError("pipeline must not run for a malformed part number")
+
+    monkeypatch.setattr(routes, "process_upload", never)
+    assert _post_part(client, synthetic_csv(3), "abc", 1).status_code == 400

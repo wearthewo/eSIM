@@ -89,8 +89,10 @@ def xlsx_bytes() -> Callable[..., bytes]:
 
 @pytest.fixture
 def too_many_rows_csv() -> bytes:
-    """CSV with MAX_ROWS + 1 (501) valid synthetic rows."""
-    return synthetic_csv(501)
+    """CSV with MAX_ROWS + 1 (10,001) valid synthetic rows."""
+    from app.core.parser import MAX_ROWS
+
+    return synthetic_csv(MAX_ROWS + 1)
 
 
 @pytest.fixture

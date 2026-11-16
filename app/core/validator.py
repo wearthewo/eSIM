@@ -17,6 +17,7 @@ _DIGITS = re.compile(r"[0-9]+")
 _IMSI = re.compile(r"[0-9]{15}")
 _MSISDN = re.compile(r"\+?[0-9]{7,15}")
 _WHITESPACE = re.compile(r"\s")
+MAX_EMAIL_CHARS = 254
 
 # Fixed messages keyed by issue code. None of them interpolate field values.
 MESSAGES: dict[str, str] = {
@@ -35,18 +36,22 @@ MESSAGES: dict[str, str] = {
     ),
     "activation_code_host": "Activation code has an empty SM-DP+ address.",
     "activation_code_matching_id": "Activation code has an empty matching ID.",
+    "email_format": "Email address is not valid (expected a form like name@example.com).",
+    "email_missing": "No email; row will have an empty address in mailmerge.csv",
 }
 
 
-def validate(records: list[EsimRecord]) -> ValidationReport:
+def validate(records: list[EsimRecord], *, has_email_column: bool = False) -> ValidationReport:
     """Run every field check plus duplicate detection.
 
     A record is ``valid`` if it has no error-severity issues. Warnings are
-    reported but do not exclude the record.
+    reported but do not exclude the record. With ``has_email_column`` (the
+    upload has an ``email`` column) a row without an address gets a warning.
+    Repeated emails are allowed: one person can receive several eSIMs.
     """
     issues: list[ValidationIssue] = []
     for rec in records:
-        issues.extend(_record_issues(rec))
+        issues.extend(_record_issues(rec, has_email_column))
     issues.extend(find_duplicates(records))
 
     error_rows = {i.row_number for i in issues if i.severity == "error"}
@@ -54,7 +59,7 @@ def validate(records: list[EsimRecord]) -> ValidationReport:
     return ValidationReport(valid=valid, issues=issues)
 
 
-def _record_issues(rec: EsimRecord) -> list[ValidationIssue]:
+def _record_issues(rec: EsimRecord, has_email_column: bool = False) -> list[ValidationIssue]:
     row = rec.row_number
     issues = [_issue(row, "iccid", code, sev) for code, sev in validate_iccid(rec.iccid)]
 
@@ -65,6 +70,11 @@ def _record_issues(rec: EsimRecord) -> list[ValidationIssue]:
         issues.append(_issue(row, "imsi", code))
     if rec.msisdn and (code := validate_msisdn(rec.msisdn)):
         issues.append(_issue(row, "msisdn", code))
+    if rec.email:
+        if code := validate_email(rec.email):
+            issues.append(_issue(row, "email", code))
+    elif has_email_column:
+        issues.append(_issue(row, "email", "email_missing", "warning"))
     return issues
 
 
@@ -103,6 +113,21 @@ def validate_imsi(value: str) -> str | None:
 def validate_msisdn(value: str) -> str | None:
     """Return an issue code unless ``value`` is an optional ``+`` then 7-15 digits."""
     return None if _MSISDN.fullmatch(value) else "msisdn_format"
+
+
+def validate_email(value: str) -> str | None:
+    """Basic shape check only; returns an issue code or None. Never echoes the value.
+
+    Requires exactly one ``@``, a non-empty local part, a domain with a dot and
+    no empty labels, no whitespace, and at most ``MAX_EMAIL_CHARS`` characters.
+    """
+    if len(value) > MAX_EMAIL_CHARS or _WHITESPACE.search(value) or value.count("@") != 1:
+        return "email_format"
+    local, domain = value.split("@")
+    labels = domain.split(".")
+    if not local or len(labels) < 2 or not all(labels):
+        return "email_format"
+    return None
 
 
 def validate_activation_code(value: str) -> str | None:

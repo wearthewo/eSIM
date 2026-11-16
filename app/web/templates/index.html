@@ -4,7 +4,13 @@
 <p>
   Upload a CSV or XLSX file of eSIM activation codes (up to {{ max_rows }} rows,
   {{ max_upload_mb }} MB). Each row becomes a branded PDF with a QR code, and you
-  download them all as one ZIP file.
+  download them as a ZIP file. Orders over {{ chunk_rows }} rows are generated in
+  parts of {{ chunk_rows }} rows, one ZIP file per part.
+</p>
+<p>
+  Add an optional <code>email</code> column to also get <code>mailmerge.csv</code>
+  (email, customer name, plan, ICCID, PDF file name) for your own mail merge.
+  This site never sends email.
 </p>
 <p class="notice">
   Files are processed in memory and never stored. Nothing you upload is saved,
@@ -43,13 +49,18 @@
            maxlength="{{ max_footer_chars }}" value="{{ form.footer_text }}">
   </fieldset>
 
-  <input type="hidden" name="download_token" value="">
+  {# Filled in by app.js: the local date and time for the ZIP name, and which part to build. #}
+  <input type="hidden" name="client_stamp" value="">
+  <input type="hidden" name="part" value="1">
+  <input type="hidden" name="parts" value="1">
 
   <div id="results" aria-live="polite">
     {% if error or results %}{% include "_results.html" %}{% endif %}
   </div>
-  <p id="generating" role="status" hidden>
-    Generating, this can take up to 30 seconds for 500 rows&hellip;
-  </p>
+  <div id="progress" hidden>
+    <p id="generating" role="status"></p>
+    <button type="button" id="cancel">Cancel</button>
+    <button type="button" id="retry" hidden>Retry</button>
+  </div>
 </form>
 {% endblock %}

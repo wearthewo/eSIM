@@ -1,8 +1,10 @@
-"""In-memory ZIP assembly plus the manifest.
+"""In-memory ZIP assembly plus the manifest and the mail-merge list.
 
 PDFs are already compressed, so entries use ``ZIP_STORED``. The manifest
-lists only ``row_number``, ``iccid`` and ``pdf_filename``. It never contains
-activation or confirmation codes.
+lists only ``row_number``, ``iccid`` and ``pdf_filename``. ``mailmerge.csv``
+(only for uploads with an ``email`` column) lists ``email``, ``customer_name``,
+``plan_name``, ``iccid`` and ``pdf_filename``. Neither file ever contains
+activation codes, matching IDs or confirmation codes.
 """
 
 from __future__ import annotations
@@ -16,6 +18,14 @@ from collections.abc import Iterable
 
 MANIFEST_NAME = "manifest.csv"
 MANIFEST_COLUMNS: tuple[str, str, str] = ("row_number", "iccid", "pdf_filename")
+MAILMERGE_NAME = "mailmerge.csv"
+MAILMERGE_COLUMNS: tuple[str, str, str, str, str] = (
+    "email",
+    "customer_name",
+    "plan_name",
+    "iccid",
+    "pdf_filename",
+)
 CSV_INJECTION_PREFIXES: tuple[str, ...] = ("=", "+", "-", "@", "\t", "\r")
 FALLBACK_STEM = "file"
 # Earliest timestamp a ZIP entry can hold; fixed so identical input gives identical bytes.
@@ -73,16 +83,34 @@ def build_manifest(entries: Iterable[tuple[int, str, str]]) -> bytes:
     Starts with a BOM so Excel detects UTF-8 (Greek names display correctly).
     Writes a header row and escapes every cell. Secrets are never included.
     """
+    return _csv_bytes(MANIFEST_COLUMNS, entries)
+
+
+def build_mailmerge(entries: Iterable[tuple[str, str, str, str, str]]) -> bytes:
+    """Render ``(email, customer_name, plan_name, iccid, pdf_filename)`` rows as UTF-8 CSV bytes.
+
+    For a mail merge run by the user; the server never sends mail. Starts with
+    a BOM, writes a header row and escapes every cell, like the manifest.
+    Secrets are never included.
+    """
+    return _csv_bytes(MAILMERGE_COLUMNS, entries)
+
+
+def _csv_bytes(header: Iterable[str], rows: Iterable[Iterable[object]]) -> bytes:
     buf = io.StringIO()
     writer = csv.writer(buf, lineterminator="\r\n")
-    writer.writerow(MANIFEST_COLUMNS)
-    for row_number, iccid, pdf_filename in entries:
-        writer.writerow([escape_csv_cell(str(cell)) for cell in (row_number, iccid, pdf_filename)])
+    writer.writerow(header)
+    for row in rows:
+        writer.writerow([escape_csv_cell(str(cell)) for cell in row])
     return buf.getvalue().encode("utf-8-sig")
 
 
-def build_zip(files: Iterable[tuple[str, bytes]], manifest: bytes | None = None) -> bytes:
-    """Write ``(name, data)`` pairs (plus optional manifest) into an in-memory ZIP.
+def build_zip(
+    files: Iterable[tuple[str, bytes]],
+    manifest: bytes | None = None,
+    mailmerge: bytes | None = None,
+) -> bytes:
+    """Write ``(name, data)`` pairs (plus optional manifest and mail-merge list) into a ZIP.
 
     Uses ``ZIP_STORED`` and fixed timestamps (deterministic output), sanitizes
     names, sets the UTF-8 flag for non-ASCII names, and raises ``ValueError``
@@ -92,6 +120,8 @@ def build_zip(files: Iterable[tuple[str, bytes]], manifest: bytes | None = None)
     entries = [(sanitize_filename(name), data) for name, data in files]
     if manifest is not None:
         entries.append((MANIFEST_NAME, manifest))
+    if mailmerge is not None:
+        entries.append((MAILMERGE_NAME, mailmerge))
 
     seen: set[str] = set()
     for name, _ in entries:

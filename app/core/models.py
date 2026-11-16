@@ -28,7 +28,9 @@ class EsimRecord:
 
     ``activation_code`` is always the full LPA string, given directly or built
     from ``smdp_address`` + ``matching_id``. ``confirmation_code`` is a
-    separate secret and is never part of ``activation_code``.
+    separate secret and is never part of ``activation_code``. ``email`` is
+    personal data used only for ``mailmerge.csv``: never printed on the PDF,
+    never logged, and redacted in ``repr``.
     """
 
     row_number: int
@@ -39,15 +41,18 @@ class EsimRecord:
     msisdn: str | None = None
     customer_name: str | None = None
     plan_name: str | None = None
+    email: str | None = None
 
     def __repr__(self) -> str:
         """Return a repr with secrets redacted so they cannot leak via logs or tracebacks."""
         confirmation = None if self.confirmation_code is None else _REDACTED
+        email = None if self.email is None else _REDACTED
         return (
             f"EsimRecord(row_number={self.row_number!r}, iccid={self.iccid!r}, "
             f"activation_code={_REDACTED}, confirmation_code={confirmation}, "
             f"imsi={self.imsi!r}, msisdn={self.msisdn!r}, "
-            f"customer_name={self.customer_name!r}, plan_name={self.plan_name!r})"
+            f"customer_name={self.customer_name!r}, plan_name={self.plan_name!r}, "
+            f"email={email})"
         )
 
 

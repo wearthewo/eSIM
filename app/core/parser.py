@@ -12,6 +12,7 @@ Light normalization happens here (the validator stays strict):
   * a case-insensitive ``lpa:1$`` prefix becomes ``LPA:1$`` (nothing else changes)
   * MSISDN loses spaces, dashes and parentheses (a leading ``+`` is kept)
   * ICCID and IMSI are trimmed only
+  * email (optional column) is trimmed and its domain is lower-cased
 
 Never log activation codes, confirmation codes, or file contents. ``ParseError``
 messages name rows and columns only, never cell values.
@@ -24,17 +25,19 @@ import io
 import os
 import re
 from collections.abc import Callable, Iterable, Iterator, Sequence
+from dataclasses import dataclass
 
 from app.core.models import EsimRecord, ParseError
 
-MAX_ROWS = 500
+MAX_ROWS = 10_000
 SUPPORTED_EXTENSIONS: frozenset[str] = frozenset({".csv", ".xlsx"})
 REQUIRED_COLUMNS: frozenset[str] = frozenset({"iccid"})
 ACTIVATION_FULL_COLUMN = "activation_code"
 ACTIVATION_SPLIT_COLUMNS: tuple[str, str] = ("smdp_address", "matching_id")
 OPTIONAL_COLUMNS: frozenset[str] = frozenset(
-    {"confirmation_code", "imsi", "msisdn", "customer_name", "plan_name"}
+    {"confirmation_code", "imsi", "msisdn", "customer_name", "plan_name", "email"}
 )
+EMAIL_COLUMN = "email"
 KNOWN_COLUMNS: frozenset[str] = (
     REQUIRED_COLUMNS
     | {ACTIVATION_FULL_COLUMN}
@@ -52,17 +55,35 @@ _MSISDN_SEPARATORS = re.compile(r"[ \-()]")
 Cell = str | None
 
 
-def parse_upload(data: bytes, filename: str) -> list[EsimRecord]:
-    """Pick the parser from the file extension and return the parsed records.
+@dataclass(frozen=True, slots=True)
+class ParsedUpload:
+    """The parsed records plus the known columns found in the header row."""
+
+    records: list[EsimRecord]
+    columns: frozenset[str]
+
+    @property
+    def has_email(self) -> bool:
+        """True when the file has an ``email`` column (even if every cell is empty)."""
+        return EMAIL_COLUMN in self.columns
+
+
+def parse_table(data: bytes, filename: str) -> ParsedUpload:
+    """Pick the parser from the file extension; return the records and the columns present.
 
     Raises ``ParseError`` for unsupported extensions or unreadable content.
     """
     extension = os.path.splitext(filename or "")[1].lower()
     if extension == ".csv":
-        return parse_csv(data)
+        return _parse_csv(data)
     if extension == ".xlsx":
-        return parse_xlsx(data)
+        return _parse_xlsx(data)
     raise ParseError("Unsupported file type. Upload a .csv or .xlsx file.")
+
+
+def parse_upload(data: bytes, filename: str) -> list[EsimRecord]:
+    """``parse_table`` without the column information: just the parsed records."""
+    return parse_table(data, filename).records
 
 
 def parse_csv(data: bytes) -> list[EsimRecord]:
@@ -73,6 +94,10 @@ def parse_csv(data: bytes) -> list[EsimRecord]:
     columns are ignored, as in ``parse_xlsx``), and enforces ``MAX_ROWS``. All cells stay
     ``str``. Raises ``ParseError``.
     """
+    return _parse_csv(data).records
+
+
+def _parse_csv(data: bytes) -> ParsedUpload:
     try:
         text = data.decode("utf-8-sig")
     except UnicodeDecodeError:
@@ -90,7 +115,7 @@ def parse_csv(data: bytes) -> list[EsimRecord]:
     header = [cell.strip() for cell in rows[0]]
     columns = normalize_headers(header)
     numbered = ((number, [_trim(c) for c in row]) for number, row in enumerate(rows[1:], start=2))
-    return _build_records(numbered, columns)
+    return ParsedUpload(_build_records(numbered, columns), frozenset(columns))
 
 
 def parse_xlsx(data: bytes) -> list[EsimRecord]:
@@ -106,6 +131,10 @@ def parse_xlsx(data: bytes) -> list[EsimRecord]:
     and only columns that map to known headers are read. Values in unknown
     columns are never looked at, so a row with data only there counts as blank.
     """
+    return _parse_xlsx(data).records
+
+
+def _parse_xlsx(data: bytes) -> ParsedUpload:
     from openpyxl import load_workbook
 
     try:
@@ -132,7 +161,7 @@ def parse_xlsx(data: bytes) -> list[EsimRecord]:
             (number, _xlsx_cells(number, row, names_by_index, width))
             for number, row in enumerate(data_rows, start=2)
         )
-        return _build_records(numbered, columns)
+        return ParsedUpload(_build_records(numbered, columns), frozenset(columns))
     finally:
         workbook.close()
 
@@ -266,7 +295,16 @@ def _build_record(number: int, cells: list[Cell], columns: dict[str, int]) -> Es
         msisdn=msisdn,
         customer_name=get("customer_name"),
         plan_name=get("plan_name"),
+        email=_normalize_email(get(EMAIL_COLUMN)),
     )
+
+
+def _normalize_email(value: Cell) -> Cell:
+    """Lower-case the domain (the part after the last ``@``); the local part is kept as is."""
+    if value is None:
+        return None
+    local, at, domain = value.rpartition("@")
+    return f"{local}{at}{domain.lower()}" if at else value
 
 
 def _activation_code(get: Callable[[str], Cell]) -> str:

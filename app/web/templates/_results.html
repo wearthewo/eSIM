@@ -6,19 +6,26 @@
   {% set report = results.report %}
   {% set n_errors = report.errors | length %}
   {% set n_warnings = report.warnings | length %}
+  {% set n_issues = report.issues | length %}
   <p class="summary">{{ results.row_count }} row{{ "" if results.row_count == 1 else "s" }} read: {{ n_errors }} error{{ "" if n_errors == 1 else "s" }}, {{ n_warnings }} warning{{ "" if n_warnings == 1 else "s" }}.</p>
   {% if report.issues %}
   <table>
     <thead><tr><th>Row</th><th>Field</th><th>Message</th><th>Severity</th></tr></thead>
     <tbody>
-    {% for issue in report.issues %}
+    {% for issue in report.issues[:max_issues_shown] %}
       <tr class="{{ issue.severity }}"><td>{{ issue.row_number }}</td><td>{{ issue.field }}</td><td>{{ issue.message }}</td><td>{{ issue.severity }}</td></tr>
     {% endfor %}
     </tbody>
   </table>
+  {% if n_issues > max_issues_shown %}
+  <p>Showing the first {{ max_issues_shown }} of {{ n_issues }} problems.</p>
+  {% endif %}
   {% endif %}
   {% if report.ok %}
-  <button type="submit" id="download">Download ZIP</button>
+  {% if results.parts > 1 %}
+  <p class="parts-note">This order is generated in {{ results.parts }} parts of up to {{ chunk_rows }} rows, one ZIP file per part, downloaded one after another. Your browser may ask you to allow multiple downloads.</p>
+  {% endif %}
+  <button type="submit" id="download" data-parts="{{ results.parts }}">Download {{ "ZIP" if results.parts == 1 else results.parts ~ " ZIP files" }}</button>
   {% else %}
   <p>Fix the errors and choose the file again. No PDFs are generated while any row has an error.</p>
   {% endif %}
