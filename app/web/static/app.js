@@ -563,13 +563,27 @@
     setStep(3);
   }
 
-  function startPartList(current) {
+  // `downloaded` (optional): part numbers already downloaded in an earlier session of the
+  // same batch ("Continue this batch"); they start as "Downloaded" ("Download again").
+  function startPartList(current, downloaded) {
     current.mode = "manual";
     current.state = {};
+    (downloaded || []).forEach(function (n) { current.state[n] = "downloaded"; });
     buildPartList(current);
-    showParts(current, "This order has " + current.parts + " parts. Download them one by " +
-      "one: each part is generated when you click its button.");
+    var done = downloadedCount(current);
+    showParts(current, done ?
+      "Continuing this batch: " + done + " of " + current.parts + " parts were downloaded " +
+        "before. Download the remaining parts one by one." :
+      "This order has " + current.parts + " parts. Download them one by " +
+        "one: each part is generated when you click its button.");
     byId("next-part").focus(); // the button that was clicked may be hidden now
+  }
+
+  // "1,3" -> [1, 3]: valid part numbers only.
+  function partNumbers(text, parts) {
+    return String(text || "").split(",").map(Number).filter(function (n) {
+      return Number.isInteger(n) && n >= 1 && n <= parts;
+    });
   }
 
   // Generate part n and hand it to the browser. Only one part at a time: every button is
@@ -679,7 +693,11 @@
       renamed: [],
       state: {}
     };
-    if (run.parts === 1) {
+    if (button && button.dataset.downloaded !== undefined) {
+      // Continuing an unfinished batch: always the parts list, since the parts still to
+      // download need not follow each other (the folder mode saves parts in order).
+      startPartList(run, partNumbers(button.dataset.downloaded, run.parts));
+    } else if (run.parts === 1) {
       requestPart(run);
     } else if (typeof window.showDirectoryPicker === "function") {
       askForFolder(run);
@@ -739,6 +757,301 @@
       manual();
     }
   });
+
+  // --- Date picker: a calendar popup for <div data-datepicker><input></div> (History). ----
+  // The text field (dd/mm/yyyy) stays the value that is sent and can always be typed in;
+  // the popup only fills it in. Built with createElement and textContent only (CSP: no
+  // inline styles or scripts). Weeks start on Monday. Keyboard, as in the WAI-ARIA date
+  // picker dialog: the "Calendar" button opens it with focus on the field's date (else
+  // today); arrows move by a day or a week, Home/End to the start/end of the week,
+  // Page Up/Page Down by a month, Shift+Page Up/Page Down by a year; Enter or Space picks
+  // the date; Escape closes without a change. Both return focus to the button. Tab stays
+  // inside the popup. A click outside closes it.
+
+  var MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July",
+    "August", "September", "October", "November", "December"];
+  var DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+  var SVG_NS = "http://www.w3.org/2000/svg";
+  var picker = null; // the open popup: { wrapper, input, toggle, dialog, title, body, focused }
+
+  function two(n) { return String(n).padStart(2, "0"); }
+
+  function formatDate(date) {
+    return two(date.getDate()) + "/" + two(date.getMonth() + 1) + "/" +
+      String(date.getFullYear()).padStart(4, "0");
+  }
+
+  // A dd/mm/yyyy text (ASCII digits) as a local date, or null if it is not a real date.
+  function parseDate(text) {
+    var match = /^([0-9]{2})\/([0-9]{2})\/([0-9]{4})$/.exec(String(text).trim());
+    if (!match) return null;
+    var day = Number(match[1]), month = Number(match[2]) - 1, year = Number(match[3]);
+    var date = new Date(2000, month, day);
+    date.setFullYear(year); // years below 100 too
+    if (date.getFullYear() !== year || date.getMonth() !== month || date.getDate() !== day) {
+      return null;
+    }
+    return date;
+  }
+
+  function today() {
+    var now = new Date();
+    return new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  }
+
+  function addDays(date, days) {
+    return new Date(date.getFullYear(), date.getMonth(), date.getDate() + days);
+  }
+
+  // The same day `months` later, or the month's last day when it is shorter.
+  function addMonths(date, months) {
+    var first = new Date(date.getFullYear(), date.getMonth() + months, 1);
+    var last = new Date(first.getFullYear(), first.getMonth() + 1, 0).getDate();
+    return new Date(first.getFullYear(), first.getMonth(), Math.min(date.getDate(), last));
+  }
+
+  function sameDay(a, b) {
+    return Boolean(a && b) && a.getFullYear() === b.getFullYear() &&
+      a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+  }
+
+  function weekday(date) { return (date.getDay() + 6) % 7; } // Monday 0 ... Sunday 6
+
+  function calendarIcon() {
+    var svg = document.createElementNS(SVG_NS, "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("stroke", "currentColor");
+    svg.setAttribute("stroke-width", "2");
+    svg.setAttribute("stroke-linecap", "round");
+    svg.setAttribute("aria-hidden", "true");
+    svg.setAttribute("focusable", "false");
+    ["M3 6h18v15H3z", "M3 10h18", "M8 3v4", "M16 3v4"].forEach(function (d) {
+      var path = document.createElementNS(SVG_NS, "path");
+      path.setAttribute("d", d);
+      svg.appendChild(path);
+    });
+    return svg;
+  }
+
+  function setUpDatePicker(wrapper) {
+    var input = wrapper.querySelector("input");
+    if (!input || wrapper.querySelector(".datepicker-toggle")) return;
+    var label = input.id ? document.querySelector("label[for='" + input.id + "']") : null;
+    var toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "btn datepicker-toggle";
+    toggle.setAttribute("aria-haspopup", "dialog");
+    toggle.setAttribute("aria-expanded", "false");
+    toggle.setAttribute("aria-label", "Calendar for " +
+      (label ? label.textContent.trim() : "the date"));
+    toggle.appendChild(calendarIcon());
+    wrapper.appendChild(toggle);
+  }
+
+  function closePicker(returnFocus) {
+    if (!picker) return;
+    var closing = picker;
+    picker = null;
+    closing.dialog.remove();
+    closing.toggle.setAttribute("aria-expanded", "false");
+    if (returnFocus) closing.toggle.focus();
+  }
+
+  function navButton(text, label) {
+    var button = document.createElement("button");
+    button.type = "button";
+    button.className = "btn btn-sm";
+    button.setAttribute("aria-label", label);
+    button.textContent = text;
+    return button;
+  }
+
+  function openPicker(wrapper) {
+    closePicker(false);
+    var input = wrapper.querySelector("input");
+    var toggle = wrapper.querySelector(".datepicker-toggle");
+    var titleId = input.id + "-calendar-title";
+
+    var dialog = document.createElement("div");
+    dialog.className = "datepicker-popup";
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    dialog.setAttribute("aria-labelledby", titleId);
+
+    var header = document.createElement("div");
+    header.className = "datepicker-header";
+    var previous = navButton("‹", "Previous month");
+    previous.dataset.monthStep = "-1";
+    var title = document.createElement("h2");
+    title.id = titleId;
+    title.setAttribute("aria-live", "polite");
+    var next = navButton("›", "Next month");
+    next.dataset.monthStep = "1";
+    header.append(previous, title, next);
+
+    var grid = document.createElement("table");
+    grid.className = "datepicker-grid";
+    grid.setAttribute("role", "grid");
+    grid.setAttribute("aria-labelledby", titleId);
+    var head = grid.createTHead().insertRow();
+    DAY_NAMES.forEach(function (name) {
+      var cell = document.createElement("th");
+      cell.scope = "col";
+      cell.abbr = name;
+      cell.textContent = name.slice(0, 2);
+      head.appendChild(cell);
+    });
+    var body = grid.createTBody();
+
+    var hint = document.createElement("p");
+    hint.className = "hint";
+    hint.textContent = "Arrow keys move, Page Up and Page Down change the month, " +
+      "Enter picks a date, Escape closes.";
+
+    dialog.append(header, grid, hint);
+    wrapper.appendChild(dialog);
+    toggle.setAttribute("aria-expanded", "true");
+    picker = {
+      wrapper: wrapper, input: input, toggle: toggle, dialog: dialog, title: title, body: body,
+      focused: parseDate(input.value) || today()
+    };
+    renderMonth();
+    focusDay();
+  }
+
+  // Draw the month of picker.focused: one row per week, empty cells outside the month.
+  function renderMonth() {
+    var focused = picker.focused;
+    var selected = parseDate(picker.input.value);
+    var now = today();
+    var first = new Date(focused.getFullYear(), focused.getMonth(), 1);
+    var days = new Date(focused.getFullYear(), focused.getMonth() + 1, 0).getDate();
+    picker.title.textContent = MONTH_NAMES[focused.getMonth()] + " " + focused.getFullYear();
+    var rows = [];
+    var row = null;
+    var offset = weekday(first);
+    for (var slot = 0; slot < offset + days; slot++) {
+      if (slot % 7 === 0) {
+        row = document.createElement("tr");
+        rows.push(row);
+      }
+      var cell = document.createElement("td");
+      if (slot >= offset) {
+        var date = new Date(first.getFullYear(), first.getMonth(), slot - offset + 1);
+        var button = document.createElement("button");
+        button.type = "button";
+        button.className = "btn datepicker-day";
+        button.tabIndex = sameDay(date, focused) ? 0 : -1;
+        button.dataset.date = formatDate(date);
+        button.textContent = String(date.getDate());
+        button.setAttribute("aria-label", DAY_NAMES[weekday(date)] + " " + date.getDate() +
+          " " + MONTH_NAMES[date.getMonth()] + " " + date.getFullYear());
+        if (sameDay(date, now)) button.setAttribute("aria-current", "date");
+        cell.setAttribute("aria-selected", sameDay(date, selected) ? "true" : "false");
+        cell.appendChild(button);
+      }
+      row.appendChild(cell);
+    }
+    while (row && row.cells.length < 7) row.appendChild(document.createElement("td"));
+    picker.body.replaceChildren.apply(picker.body, rows);
+  }
+
+  function focusedButton() {
+    return picker.body.querySelector("[data-date='" + formatDate(picker.focused) + "']");
+  }
+
+  function focusDay() {
+    var button = focusedButton();
+    if (button) button.focus();
+  }
+
+  // Move the focus to `date`, redrawing when the month changes.
+  function moveTo(date) {
+    var monthChanged = date.getMonth() !== picker.focused.getMonth() ||
+      date.getFullYear() !== picker.focused.getFullYear();
+    picker.focused = date;
+    if (monthChanged) {
+      renderMonth();
+    } else {
+      picker.body.querySelectorAll(".datepicker-day").forEach(function (button) {
+        button.tabIndex = button.dataset.date === formatDate(date) ? 0 : -1;
+      });
+    }
+    focusDay();
+  }
+
+  function pick(date) {
+    var input = picker.input;
+    input.value = formatDate(date);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    closePicker(true);
+  }
+
+  var DAY_KEYS = {
+    ArrowLeft: function (d) { return addDays(d, -1); },
+    ArrowRight: function (d) { return addDays(d, 1); },
+    ArrowUp: function (d) { return addDays(d, -7); },
+    ArrowDown: function (d) { return addDays(d, 7); },
+    Home: function (d) { return addDays(d, -weekday(d)); },
+    End: function (d) { return addDays(d, 6 - weekday(d)); },
+    PageUp: function (d, shift) { return addMonths(d, shift ? -12 : -1); },
+    PageDown: function (d, shift) { return addMonths(d, shift ? 12 : 1); }
+  };
+
+  document.addEventListener("keydown", function (event) {
+    if (!picker || !picker.dialog.contains(event.target)) return;
+    var onDay = event.target.classList.contains("datepicker-day");
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closePicker(true);
+    } else if (event.key === "Tab") {
+      // Keep the focus inside the popup: previous month, next month, the focused day.
+      var stops = Array.prototype.slice.call(picker.dialog.querySelectorAll(".datepicker-header button"));
+      var day = focusedButton();
+      if (day) stops.push(day);
+      var at = stops.indexOf(event.target);
+      event.preventDefault();
+      stops[(at + (event.shiftKey ? -1 : 1) + stops.length) % stops.length].focus();
+    } else if (onDay && DAY_KEYS[event.key]) {
+      event.preventDefault();
+      moveTo(DAY_KEYS[event.key](picker.focused, event.shiftKey));
+    } else if (onDay && (event.key === "Enter" || event.key === " ")) {
+      event.preventDefault(); // no click as well
+      pick(parseDate(event.target.dataset.date));
+    }
+  });
+
+  document.addEventListener("click", function (event) {
+    var target = event.target instanceof Element ? event.target : null;
+    if (!target) return;
+    var toggle = target.closest(".datepicker-toggle");
+    if (toggle) {
+      var wrapper = toggle.closest("[data-datepicker]");
+      if (picker && picker.wrapper === wrapper) {
+        closePicker(true);
+      } else {
+        openPicker(wrapper);
+      }
+      return;
+    }
+    if (!picker) return;
+    if (!picker.dialog.contains(target)) {
+      closePicker(false); // a click outside
+      return;
+    }
+    var day = target.closest(".datepicker-day");
+    var step = target.closest("[data-month-step]");
+    if (day) {
+      pick(parseDate(day.dataset.date));
+    } else if (step) {
+      picker.focused = addMonths(picker.focused, Number(step.dataset.monthStep));
+      renderMonth(); // the focus stays on the month button
+    }
+  });
+
+  document.querySelectorAll("[data-datepicker]").forEach(setUpDatePicker);
 
   // --- Display only below: none of these listeners prevents or changes a request. -----
 

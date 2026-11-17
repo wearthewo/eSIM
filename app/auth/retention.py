@@ -4,6 +4,10 @@
 - audit_log: 90 days.
 - sessions: as soon as they have expired (absolute or idle limit).
 - invites and password_tokens: used or expired ones, 7 days after they were created.
+- code_fingerprints: 12 months (``app.batches.DUPLICATE_WINDOW``).
+- batches: still ``partial`` 24 hours after they were created -> ``incomplete``; still
+  ``validated`` (nothing generated) after 24 hours -> deleted (``app.batches.purge``).
+  As the purge runs once a day, "after 24 hours" means within 24 to 48 hours.
 
 ``purge`` always runs (``python -m app.admin purge``). ``purge_if_due`` runs it at
 most once per UTC day across all processes: it holds a transaction-scoped advisory
@@ -18,6 +22,7 @@ import datetime as dt
 from sqlalchemy import Delete, delete, func, or_, select
 from sqlalchemy.orm import Session
 
+from app import batches
 from app.auth import accounts
 from app.auth.accounts import SESSION_IDLE_TTL
 from app.db.models import (
@@ -67,6 +72,7 @@ def purge(db: Session, *, now: dt.datetime) -> dict[str, int]:
                 or_(table.used_at.is_not(None), table.expires_at <= now),
             ),
         )
+    counts.update(batches.purge(db, now=now))
     accounts.audit(db, RETENTION_PURGE, AuditOutcome.SUCCESS, now=now)
     return counts
 

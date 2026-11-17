@@ -23,6 +23,7 @@ from app.db.models import (
     AuditLog,
     AuditOutcome,
     Batch,
+    BatchPart,
     BatchStatus,
     Branding,
     CodeFingerprint,
@@ -123,8 +124,14 @@ def test_defaults(db: Session, org: Organization, user: User) -> None:
     assert user.is_superadmin is False
     assert user.disabled is False
     assert user.last_login_at is None
-    assert batch.status is BatchStatus.RUNNING
-    assert (batch.parts, batch.error_count, batch.warning_count) == (0, 0, 0)
+    assert batch.status is BatchStatus.VALIDATED
+    assert (batch.parts, batch.parts_downloaded, batch.error_count, batch.warning_count) == (
+        0,
+        0,
+        0,
+        0,
+    )
+    assert batch.file_name == ""
     assert request.status is AccessRequestStatus.PENDING
 
 
@@ -334,6 +341,29 @@ def test_counters_cannot_go_negative(db: Session, org: Organization) -> None:
     )
 
 
+@pytest.mark.parametrize("downloaded", [-1, 3])
+def test_parts_downloaded_stays_within_parts(
+    db: Session, org: Organization, downloaded: int
+) -> None:
+    bad = Batch(organization_id=org.id, parts=2, parts_downloaded=downloaded)
+    assert _add_fails(db, bad) == "ck_batches_parts_downloaded_range"
+
+
+def test_batch_status_is_checked(db: Session, org: Organization) -> None:
+    db.add(Batch(organization_id=org.id))
+    db.flush()
+    error = _sql_fails(db, "UPDATE batches SET status = 'running'")
+    assert _constraint(error) == "ck_batches_status"
+
+
+def test_batch_part_is_once_per_part_and_positive(db: Session, org: Organization) -> None:
+    batch = _batch(db, org)
+    db.add(BatchPart(batch_id=batch.id, part=1))
+    db.flush()
+    assert _add_fails(db, BatchPart(batch_id=batch.id, part=1)) == "pk_batch_parts"
+    assert _add_fails(db, BatchPart(batch_id=batch.id, part=0)) == "ck_batch_parts_part_positive"
+
+
 # --- audit log --------------------------------------------------------------------
 
 
@@ -475,7 +505,36 @@ def test_deleting_a_batch_deletes_its_fingerprints(db: Session, org: Organizatio
             batch_id=batch.id,
         )
     )
+    db.add(BatchPart(batch_id=batch.id, part=1))
     db.flush()
     db.delete(batch)
     db.flush()
     assert db.scalars(select(CodeFingerprint)).all() == []
+    assert db.scalars(select(BatchPart)).all() == []
+
+
+def test_voided_at_is_set_exactly_when_voided(db: Session, org: Organization) -> None:
+    now = dt.datetime(2026, 11, 17, tzinfo=dt.UTC)
+    no_time = Batch(organization_id=org.id, status=BatchStatus.VOIDED)
+    assert _add_fails(db, no_time) == "ck_batches_voided_at_iff_voided"
+    stray = Batch(organization_id=org.id, status=BatchStatus.COMPLETED, voided_at=now)
+    assert _add_fails(db, stray) == "ck_batches_voided_at_iff_voided"
+    db.add(Batch(organization_id=org.id, status=BatchStatus.VOIDED, voided_at=now))
+    db.flush()
+
+
+def test_part_sizes_and_numbers_are_positive(db: Session, org: Organization) -> None:
+    assert _add_fails(db, Batch(organization_id=org.id, chunk_rows=0)) == (
+        "ck_batches_chunk_rows_positive"
+    )
+    batch = _batch(db, org)
+    db.refresh(batch)
+    assert batch.chunk_rows == 500  # the part size before it was stored per batch
+    bad = CodeFingerprint(
+        organization_id=org.id,
+        kind=FingerprintKind.ICCID,
+        fingerprint=_digest(9),
+        batch_id=batch.id,
+        part=0,
+    )
+    assert _add_fails(db, bad) == "ck_code_fingerprints_part_positive"

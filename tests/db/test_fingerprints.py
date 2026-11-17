@@ -8,7 +8,7 @@ import hmac
 import pytest
 
 from app.db import fingerprints
-from app.db.fingerprints import DOMAIN_TAG, FingerprintKeyError, fingerprint
+from app.db.fingerprints import DOMAIN_TAG, FingerprintKeyError, fingerprint, fingerprinter
 from app.db.models import FingerprintKind
 from app.settings import Secret, Settings
 
@@ -87,3 +87,23 @@ def test_bad_arguments_do_not_echo_the_value() -> None:
     with pytest.raises(TypeError) as info:
         fingerprint(1, "iccid", 8999000000000000013, key=KEY)  # type: ignore[arg-type]
     assert "8999000000000000013" not in str(info.value)
+
+
+@pytest.mark.parametrize("kind", ["iccid", FingerprintKind.ACTIVATION])
+@pytest.mark.parametrize("value", [ICCID, CODE, "", "Ελληνικά ü", "x" * 5000])
+def test_fingerprinter_matches_fingerprint(kind, value: str) -> None:
+    for org in (1, 42, 2**40):
+        assert fingerprinter(org, kind, key=KEY)(value) == fingerprint(org, kind, value, key=KEY)
+    digest_of = fingerprinter(7, kind, key=KEY)
+    assert digest_of(value) == digest_of(value)  # the prepared state is not consumed
+
+
+def test_fingerprinter_checks_its_arguments() -> None:
+    with pytest.raises(FingerprintKeyError):
+        fingerprinter(1, "iccid", key=b"")
+    with pytest.raises(TypeError):
+        fingerprinter(True, "iccid", key=KEY)
+    with pytest.raises(ValueError):
+        fingerprinter(1, "msisdn", key=KEY)
+    with pytest.raises(TypeError):
+        fingerprinter(1, "iccid", key=KEY)(12345)  # type: ignore[arg-type]

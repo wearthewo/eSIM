@@ -166,7 +166,12 @@ def test_web_app_needs_database_and_secret_key_in_every_env() -> None:
         check_web_settings(load_settings({}))
     assert "DATABASE_URL is missing" in str(info.value)
     assert "SECRET_KEY is missing" in str(info.value)
-    check_web_settings(load_settings({"DATABASE_URL": DB_URL, "SECRET_KEY": "dev-short"}))
+    assert "FINGERPRINT_KEY is missing" in str(info.value)
+    with pytest.raises(SettingsError, match="FINGERPRINT_KEY is missing"):
+        check_web_settings(load_settings({"DATABASE_URL": DB_URL, "SECRET_KEY": "dev-short"}))
+    check_web_settings(
+        load_settings({"DATABASE_URL": DB_URL, "SECRET_KEY": "dev-short", "FINGERPRINT_KEY": "x"})
+    )
     check_web_settings(load_settings(_prod()))
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import hashlib
 import importlib.util
 import io
 import re
@@ -10,19 +11,23 @@ import tempfile
 import threading
 import zipfile
 import zlib
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
 import pytest
 import starlette.formparsers
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 from PIL import Image
 
+from app import batches
 from app.core import parser, pipeline, sheets, zipper
-from app.core.models import Branding
+from app.core.models import Branding, ParseError
+from app.db.models import User
 from app.web import routes
 from app.web.auth import CSRF_HEADER, SESSION_COOKIE
 from app.web.main import SECURITY_HEADERS
@@ -87,6 +92,67 @@ def _secret_values(data: bytes) -> set[str]:
 def _assert_no_secrets(html: str, secrets: set[str]) -> None:
     leaked = sorted(s for s in secrets if s in html)
     assert not leaked, f"secret values in HTML: {len(leaked)}"
+
+
+# --- Batches: every /generate request needs one ----------------------------------------
+# The tests in this module are about generation; batches have their own tests
+# (test_batches.py). ``batch_for`` makes the batch /validate would have made, directly in
+# the database, one per distinct file, also for files that would fail (to reach
+# /generate's own checks). ``client`` attaches it to /generate requests without one.
+
+
+def batch_for(app: FastAPI, user_id: int, filename: str, content: bytes) -> int:
+    cache: dict[bytes, int] | None = getattr(app.state, "test_batches", None)
+    if cache is None:
+        cache = app.state.test_batches = {}
+    key = hashlib.sha256(content).digest()  # test bookkeeping only, never stored
+    if key not in cache:
+        try:
+            rows = len(parser.parse_table(content, filename or "upload.csv").records)
+        except ParseError:
+            rows = 0
+        with app.state.sessionmaker.begin() as db:
+            user = db.get(User, user_id)
+            assert user is not None and user.organization_id is not None
+            cache[key] = batches.create_batch(
+                db,
+                organization_id=user.organization_id,
+                user_id=user_id,
+                file_name=filename,
+                row_count=rows,
+                parts=pipeline.part_count(rows),
+                warning_count=0,
+                now=datetime.now(UTC),
+            )
+    return cache[key]
+
+
+def with_batch(user: LoggedIn, form: dict[str, str], filename: str, content: bytes) -> dict:
+    return {**form, "batch_id": str(batch_for(user.app, user.user_id, filename, content))}
+
+
+class BatchClient(TestClient):
+    """A logged-in TestClient whose /generate posts carry the upload's batch id."""
+
+    def __init__(self, user: LoggedIn, **kwargs) -> None:
+        super().__init__(user.app, **kwargs)
+        self._user = user
+        self.cookies.set(SESSION_COOKIE, user.token)
+        self.headers[CSRF_HEADER] = user.csrf
+
+    def post(self, url, *args, **kwargs):  # type: ignore[override]
+        files = kwargs.get("files") or {}
+        data = kwargs.get("data") or {}
+        if url == "/generate" and "file" in files and "batch_id" not in data:
+            name, content = files["file"][0], files["file"][1]
+            kwargs["data"] = with_batch(self._user, data, name, content)
+        return super().post(url, *args, **kwargs)
+
+
+@pytest.fixture
+def client(logged_in: LoggedIn) -> Iterator[TestClient]:
+    with BatchClient(logged_in) as c:
+        yield c
 
 
 # --- Driving the ASGI app with a chunked body -------------------------------------
@@ -504,9 +570,11 @@ def test_generate_with_logo(client: TestClient, fixture_bytes, fmt: str, name: s
 
 
 def test_generate_without_logo_uses_default(logged_in: LoggedIn, fixture_bytes) -> None:
+    data = fixture_bytes("valid_minimal.csv")
+    form = with_batch(logged_in, FORM, "v.csv", data)
     body = _multipart(
-        *[(k, None, v.encode()) for k, v in FORM.items()],
-        ("file", "v.csv", fixture_bytes("valid_minimal.csv")),
+        *[(k, None, v.encode()) for k, v in form.items()],
+        ("file", "v.csv", data),
         ("logo", "", b""),  # what a browser sends when no logo is chosen
     )
     status, headers, response, _, _ = _asgi_post(
@@ -521,7 +589,7 @@ def test_generate_branding_override(logged_in: LoggedIn) -> None:
     logged_in.app.dependency_overrides[routes.get_branding] = lambda: Branding(
         company_name="Default (test)"
     )
-    response = logged_in.client().post(
+    response = BatchClient(logged_in).post(
         "/generate",
         data=FORM,
         files=_csv_file("v.csv", (FIXTURES_DIR / "valid_minimal.csv").read_bytes()),
@@ -866,7 +934,7 @@ def test_logo_too_many_pixels_rejected_before_decoding(
     def never(*args, **kwargs):
         raise AssertionError("pipeline must not run for an oversize logo")
 
-    monkeypatch.setattr(routes, "process_upload", never)
+    monkeypatch.setattr(routes, "_generate_part", never)
     response = client.post(
         "/generate",
         data=FORM,
@@ -994,12 +1062,13 @@ def _async_client(user: LoggedIn) -> httpx.AsyncClient:
     )
 
 
-def _post_generate(client: httpx.AsyncClient, data: bytes):
-    return client.post("/generate", data=FORM, files=_csv_file("v.csv", data))
+def _post_generate(client: httpx.AsyncClient, data: bytes, user: LoggedIn):
+    form = with_batch(user, FORM, "v.csv", data)
+    return client.post("/generate", data=form, files=_csv_file("v.csv", data))
 
 
 @pytest.mark.parametrize(
-    ("path", "target"), [("/generate", "process_upload"), ("/validate", "check_upload")]
+    ("path", "target"), [("/generate", "_generate_part"), ("/validate", "check_upload")]
 )
 def test_pipeline_runs_off_the_event_loop(
     logged_in: LoggedIn, monkeypatch, fixture_bytes, path, target
@@ -1007,10 +1076,11 @@ def test_pipeline_runs_off_the_event_loop(
     gate = _Gate(getattr(routes, target))
     monkeypatch.setattr(routes, target, gate)
     data = fixture_bytes("valid_minimal.csv")
+    form = with_batch(logged_in, FORM, "v.csv", data) if path == "/generate" else FORM
 
     async def scenario() -> None:
         async with _async_client(logged_in) as client:
-            job = asyncio.create_task(client.post(path, data=FORM, files=_csv_file("v.csv", data)))
+            job = asyncio.create_task(client.post(path, data=form, files=_csv_file("v.csv", data)))
             assert await gate.entered()
             index = await asyncio.wait_for(client.get("/"), 2)
             assert index.status_code == 200
@@ -1027,16 +1097,16 @@ def test_generate_limited_to_concurrent_jobs(
     assert routes.MAX_CONCURRENT_JOBS == 2
     assert routes.JOB_WAIT_SECONDS == 5.0
     monkeypatch.setattr(routes, "JOB_WAIT_SECONDS", 0.2)
-    gate = _Gate(routes.process_upload)
-    monkeypatch.setattr(routes, "process_upload", gate)
+    gate = _Gate(routes._generate_part)
+    monkeypatch.setattr(routes, "_generate_part", gate)
     data = fixture_bytes("valid_minimal.csv")
 
     async def scenario() -> None:
         async with _async_client(logged_in) as client:
-            jobs = [asyncio.create_task(_post_generate(client, data)) for _ in range(2)]
+            jobs = [asyncio.create_task(_post_generate(client, data, logged_in)) for _ in range(2)]
             assert await gate.entered(2)
 
-            busy = await asyncio.wait_for(_post_generate(client, data), 5)
+            busy = await asyncio.wait_for(_post_generate(client, data, logged_in), 5)
             assert busy.status_code == 503
             assert routes.MSG_BUSY in busy.text
             assert "<html" in busy.text and 'action="/generate"' in busy.text
@@ -1047,21 +1117,21 @@ def test_generate_limited_to_concurrent_jobs(
 
             gate.release.set()
             assert [(await job).status_code for job in jobs] == [200, 200]
-            assert (await _post_generate(client, data)).status_code == 200
+            assert (await _post_generate(client, data, logged_in)).status_code == 200
 
     asyncio.run(scenario())
 
 
 def test_generate_waits_for_a_free_slot(logged_in: LoggedIn, monkeypatch, fixture_bytes) -> None:
-    gate = _Gate(routes.process_upload)
-    monkeypatch.setattr(routes, "process_upload", gate)
+    gate = _Gate(routes._generate_part)
+    monkeypatch.setattr(routes, "_generate_part", gate)
     data = fixture_bytes("valid_minimal.csv")
 
     async def scenario() -> None:
         async with _async_client(logged_in) as client:
-            jobs = [asyncio.create_task(_post_generate(client, data)) for _ in range(2)]
+            jobs = [asyncio.create_task(_post_generate(client, data, logged_in)) for _ in range(2)]
             assert await gate.entered(2)
-            waiting = asyncio.create_task(_post_generate(client, data))
+            waiting = asyncio.create_task(_post_generate(client, data, logged_in))
             await asyncio.sleep(0.3)
             assert not waiting.done() and gate.running == 2  # queued, not in the pipeline
             gate.release.set()  # well within JOB_WAIT_SECONDS
@@ -1075,7 +1145,7 @@ def test_generate_waits_for_a_free_slot(logged_in: LoggedIn, monkeypatch, fixtur
 
 def test_job_slots_released_after_failures(logged_in: LoggedIn, monkeypatch, fixture_bytes) -> None:
     monkeypatch.setattr(routes, "JOB_WAIT_SECONDS", 0.1)
-    real = routes.process_upload
+    real = routes._generate_part
     calls = {"n": 0}
 
     def flaky(*args, **kwargs):
@@ -1084,8 +1154,8 @@ def test_job_slots_released_after_failures(logged_in: LoggedIn, monkeypatch, fix
             raise RuntimeError("synthetic failure")
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(routes, "process_upload", flaky)
-    with logged_in.client(raise_server_exceptions=False) as client:
+    monkeypatch.setattr(routes, "_generate_part", flaky)
+    with BatchClient(logged_in, raise_server_exceptions=False) as client:
         for _ in range(2):
             failed = client.post("/generate", data=FORM, files=_csv_file("v.csv", b"x"))
             assert failed.status_code == 500
@@ -1376,5 +1446,5 @@ def test_generate_rejects_bad_part_before_taking_a_job_slot(
     def never(*args, **kwargs):
         raise AssertionError("pipeline must not run for a malformed part number")
 
-    monkeypatch.setattr(routes, "process_upload", never)
+    monkeypatch.setattr(routes, "_generate_part", never)
     assert _post_part(client, synthetic_csv(3), "abc", 1).status_code == 400

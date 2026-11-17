@@ -25,7 +25,8 @@
     <div class="topbar-inner">
       <a class="brand" href="/">{{ brand_mark() }}eSIM PDF generator</a>
       <nav class="site-nav" aria-label="Main">
-        <a class="nav-link"{% if path == "/" %} aria-current="page"{% endif %} href="/">Upload</a>
+        {% if current_user.organization_id %}<a class="nav-link"{% if path == "/" %} aria-current="page"{% endif %} href="/">Upload</a>{% endif %}
+        <a class="nav-link"{% if path.startswith("/history") %} aria-current="page"{% endif %} href="/history">History</a>
         {% if current_user.role == "owner" and current_user.organization_id %}<a class="nav-link"{% if path.startswith("/team") %} aria-current="page"{% endif %} href="/team">Team</a>{% endif %}
         {% if current_user.is_superadmin %}
         <a class="nav-link"{% if path.startswith("/admin/orgs") %} aria-current="page"{% endif %} href="/admin/orgs">Admin</a>

@@ -3,6 +3,7 @@
 No table has a column for activation codes, matching IDs, confirmation codes,
 uploaded files, PDFs, customer names or customer emails. Codes are only ever
 stored as HMAC fingerprints (``code_fingerprints``, see ``app.db.fingerprints``).
+A batch keeps the uploaded file's sanitized name (for the History page), never its content.
 
 Conventions:
 
@@ -56,6 +57,9 @@ MAX_EMAIL_CHARS = 254
 MAX_NAME_CHARS = 200
 MAX_NOTE_CHARS = 2000
 MAX_ACTION_CHARS = 64
+MAX_FILE_NAME_CHARS = 200
+# app.core.pipeline.GENERATE_CHUNK_ROWS when batches.chunk_rows was added (migration 0005).
+DEFAULT_CHUNK_ROWS = 500
 # Match app/web/routes.py (MAX_COMPANY_CHARS, MAX_FOOTER_CHARS, MAX_LOGO_BYTES).
 MAX_BRANDING_COMPANY_CHARS = 100
 MAX_BRANDING_FOOTER_CHARS = 200
@@ -90,9 +94,24 @@ class FingerprintKind(enum.StrEnum):
 
 
 class BatchStatus(enum.StrEnum):
-    RUNNING = "running"
+    """Where a batch stands (``app.batches``).
+
+    - validated: the file passed /validate; no part generated yet (hidden from History,
+      deleted by the daily purge after 24 hours).
+    - partial: some parts generated. completed: every part generated.
+    - incomplete: still partial 24 hours after it was created (set by the daily purge).
+    - failed: a /generate request for it found errors.
+    - voided: an owner or superadmin voided it (none of its eSIMs were sent); its
+      fingerprints are deleted, so its codes are accepted again. Final.
+    A part generated later moves an incomplete or failed batch back to partial/completed.
+    """
+
+    VALIDATED = "validated"
+    PARTIAL = "partial"
     COMPLETED = "completed"
+    INCOMPLETE = "incomplete"
     FAILED = "failed"
+    VOIDED = "voided"
 
 
 class AuditOutcome(enum.StrEnum):
@@ -274,13 +293,20 @@ class Branding(Base):
 
 
 class Batch(Base):
-    """One upload's outcome: counts only, never row data."""
+    """One upload that passed validation: counts and the sanitized file name, never row data."""
 
     __tablename__ = "batches"
     __table_args__ = (
         CheckConstraint(
             "row_count >= 0 AND parts >= 0 AND error_count >= 0 AND warning_count >= 0",
             name="counts_nonnegative",
+        ),
+        CheckConstraint(
+            "parts_downloaded >= 0 AND parts_downloaded <= parts", name="parts_downloaded_range"
+        ),
+        CheckConstraint("chunk_rows >= 1", name="chunk_rows_positive"),
+        CheckConstraint(
+            "(status = 'voided') = (voided_at IS NOT NULL)", name="voided_at_iff_voided"
         ),
         Index("ix_batches_organization_id_created_at", "organization_id", "created_at"),
     )
@@ -289,15 +315,40 @@ class Batch(Base):
     organization_id: Mapped[int] = _fk("organizations.id", "CASCADE", nullable=False)
     user_id: Mapped[int | None] = _fk("users.id", "SET NULL", nullable=True, index=True)
     created_at: Mapped[dt.datetime] = _created_at()
+    # The uploaded file's name, sanitized (app.batches.sanitize_file_name). Never its content.
+    file_name: Mapped[str] = mapped_column(
+        String(MAX_FILE_NAME_CHARS), default="", server_default=""
+    )
     row_count: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
     parts: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
+    parts_downloaded: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
+    # Rows per part when the batch was created (GENERATE_CHUNK_ROWS then): every part of
+    # the batch keeps this size, even if the constant changes later.
+    chunk_rows: Mapped[int] = mapped_column(
+        Integer, default=DEFAULT_CHUNK_ROWS, server_default=text(str(DEFAULT_CHUNK_ROWS))
+    )
     error_count: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
     warning_count: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
     status: Mapped[BatchStatus] = mapped_column(
         _enum(BatchStatus, "status"),
-        default=BatchStatus.RUNNING,
-        server_default=BatchStatus.RUNNING.value,
+        default=BatchStatus.VALIDATED,
+        server_default=BatchStatus.VALIDATED.value,
     )
+    voided_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    voided_by: Mapped[int | None] = _fk("users.id", "SET NULL", nullable=True)
+
+
+class BatchPart(Base):
+    """A part of a batch that was generated (once per part, however often it is downloaded)."""
+
+    __tablename__ = "batch_parts"
+    __table_args__ = (CheckConstraint("part >= 1", name="part_positive"),)
+
+    batch_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("batches.id", ondelete="CASCADE"), primary_key=True
+    )
+    part: Mapped[int] = mapped_column(Integer, primary_key=True)
+    created_at: Mapped[dt.datetime] = _created_at()
 
 
 class CodeFingerprint(Base):
@@ -307,6 +358,7 @@ class CodeFingerprint(Base):
     __table_args__ = (
         UniqueConstraint("organization_id", "kind", "fingerprint"),
         _digest_check("fingerprint"),
+        CheckConstraint("part >= 1", name="part_positive"),
     )
 
     id: Mapped[int] = _id()
@@ -314,7 +366,10 @@ class CodeFingerprint(Base):
     kind: Mapped[FingerprintKind] = mapped_column(_enum(FingerprintKind, "kind"))
     fingerprint: Mapped[bytes] = mapped_column(LargeBinary)
     batch_id: Mapped[int] = _fk("batches.id", "CASCADE", nullable=False, index=True)
-    created_at: Mapped[dt.datetime] = _created_at()
+    # The part of the batch the row was generated in (to continue an unfinished batch);
+    # NULL for rows recorded before migration 0005.
+    part: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[dt.datetime] = _created_at(index=True)  # the 12-month purge
 
 
 class AuditLog(Base):
@@ -335,6 +390,8 @@ class AuditLog(Base):
     user_id: Mapped[int | None] = _fk("users.id", "SET NULL", nullable=True, index=True)
     # The user the action was done to (disabled, invited, sent a reset link), if any.
     target_user_id: Mapped[int | None] = _fk("users.id", "SET NULL", nullable=True, index=True)
+    # The batch the action was done to (voided), if any.
+    target_batch_id: Mapped[int | None] = _fk("batches.id", "SET NULL", nullable=True, index=True)
     organization_id: Mapped[int | None] = _fk("organizations.id", "SET NULL", nullable=True)
     action: Mapped[str] = mapped_column(String(MAX_ACTION_CHARS))
     outcome: Mapped[AuditOutcome] = mapped_column(_enum(AuditOutcome, "outcome"))

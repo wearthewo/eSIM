@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+from collections.abc import Callable
 
 from app.db.models import FingerprintKind
 from app.settings import get_settings
@@ -65,3 +66,34 @@ def fingerprint(
         + _field(value.encode("utf-8"))
     )
     return hmac.new(key, message, hashlib.sha256).digest()
+
+
+def fingerprinter(
+    organization_id: int, kind: FingerprintKind | str, *, key: bytes
+) -> Callable[[str], bytes]:
+    """``fingerprint`` for many values of one organization and kind, faster.
+
+    The keyed hash of the message prefix is computed once and copied for each value,
+    so ``fingerprinter(o, k, key=key)(v) == fingerprint(o, k, v, key=key)``.
+    """
+    if isinstance(organization_id, bool) or not isinstance(organization_id, int):
+        raise TypeError("organization_id must be an int")
+    kind = FingerprintKind(kind)
+    if not key:
+        raise FingerprintKeyError("the fingerprint key is empty")
+    prefix = hmac.new(
+        key,
+        DOMAIN_TAG
+        + _field(str(organization_id).encode("ascii"))
+        + _field(kind.value.encode("ascii")),
+        hashlib.sha256,
+    )
+
+    def one(value: str) -> bytes:
+        if not isinstance(value, str):
+            raise TypeError("value must be a str")
+        state = prefix.copy()
+        state.update(_field(value.encode("utf-8")))
+        return state.digest()
+
+    return one

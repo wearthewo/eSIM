@@ -10,11 +10,17 @@
       parts of {{ chunk_rows }} rows, one ZIP file per part.
     </p>
   </div>
+  {% if not no_organization %}
   <div class="page-actions">
     <a href="/template.xlsx" download>Download template (Excel)</a>
   </div>
+  {% endif %}
 </div>
 
+{% if no_organization %}
+{# A superadmin without an organization: no batch can be made, so no form that would refuse. #}
+<p class="alert alert-info no-organization">{{ no_organization }}</p>
+{% else %}
 <ol class="stepper" id="steps" aria-label="Steps">
   <li class="step" data-step="1" aria-current="step"><span class="step-num">1</span><span class="step-label">Upload</span></li>
   <li class="step" data-step="2"><span class="step-num">2</span><span class="step-label">Review</span></li>
@@ -133,9 +139,11 @@
       <h3>Privacy</h3>
       <p class="notice">
         Files are processed in memory and never stored. Nothing you upload is saved,
-        logged or kept after the response is sent.
+        logged or kept after the response is sent. History keeps only the file name,
+        counts and keyed fingerprints that recognise codes already used.
       </p>
     </div>
   </div>
 </section>
+{% endif %}
 {% endblock %}

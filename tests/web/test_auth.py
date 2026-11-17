@@ -425,7 +425,15 @@ def test_every_app_route_is_protected_or_known_public(web_app: FastAPI) -> None:
         if route.path.startswith("/team"):
             assert require_owner in dependencies, route.path
         checked.add(route.path)
-    core = {"/", "/template.xlsx", "/validate", "/generate", "/logout"}
+    core = {
+        "/",
+        "/template.xlsx",
+        "/validate",
+        "/generate",
+        "/logout",
+        "/history",
+        "/history/batches/{batch_id}/void",
+    }
     assert checked == core | MANAGEMENT_PATHS
 
 
@@ -452,7 +460,13 @@ def _post_routes(app: FastAPI) -> list[str]:
 
 
 def test_post_routes_are_known(web_app: FastAPI) -> None:
-    expected = ["/generate", "/logout", "/validate", *MANAGEMENT_POSTS]
+    expected = [
+        "/generate",
+        "/logout",
+        "/validate",
+        "/history/batches/{batch_id}/void",
+        *MANAGEMENT_POSTS,
+    ]
     assert _post_routes(web_app) == sorted(expected)
 
 

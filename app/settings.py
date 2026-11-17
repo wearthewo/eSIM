@@ -197,13 +197,15 @@ def load_settings(environ: Mapping[str, str]) -> Settings:
 
 
 def check_web_settings(settings: Settings) -> None:
-    """Raise ``SettingsError`` unless the web app can run: it needs the database and a
-    ``SECRET_KEY`` in every environment (production strength is checked by ``load_settings``)."""
+    """Raise ``SettingsError`` unless the web app can run: it needs the database, a
+    ``SECRET_KEY`` and a ``FINGERPRINT_KEY`` (the duplicate check) in every environment
+    (production strength is checked by ``load_settings``)."""
     problems = [
         p
         for p in (
             "DATABASE_URL is missing" if settings.database_url is None else None,
             "SECRET_KEY is missing" if settings.secret_key is None else None,
+            "FINGERPRINT_KEY is missing" if settings.fingerprint_key is None else None,
         )
         if p is not None
     ]

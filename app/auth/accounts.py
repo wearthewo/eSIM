@@ -99,13 +99,16 @@ def audit(
     organization_id: int | None = None,
     ip: IpPrefix | None = None,
     target_user_id: int | None = None,
+    target_batch_id: int | None = None,
 ) -> None:
-    """Add an audit row. ``user_id`` is who acted, ``target_user_id`` who it was done to."""
+    """Add an audit row. ``user_id`` is who acted, ``target_user_id`` who it was done to,
+    ``target_batch_id`` the batch it was done to."""
     db.add(
         AuditLog(
             created_at=now,
             user_id=user_id,
             target_user_id=target_user_id,
+            target_batch_id=target_batch_id,
             organization_id=organization_id,
             action=action,
             outcome=outcome,

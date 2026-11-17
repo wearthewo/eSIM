@@ -2,14 +2,22 @@
 
 All of them require a logged-in user (``app.web.auth.require_user``).
 
-Stateless: uploads are read from the request stream straight into memory with
-per-part caps (``read_capped``) and dropped when the response is sent. Uploads
-never go to disk. Starlette's own form parser is not used because it spools
-file parts over 1 MB to a temporary file.
+Uploads are read from the request stream straight into memory with per-part caps
+(``read_capped``) and dropped when the response is sent. Uploads never go to disk.
+Starlette's own form parser is not used because it spools file parts over 1 MB to a
+temporary file.
+
+Batches (``app.batches``): /validate also checks every row against the codes other
+batches of the organization generated in the last 12 months (HMAC fingerprints). A file
+that passes gets a batch row (metadata only: name, counts, status), and its id goes into
+the page's form. Every /generate request must send that id; a batch of another
+organization, or one that no longer exists, gives 404. Each generated part records its
+rows' fingerprints and is counted once in ``parts_downloaded`` and in the usage table.
+Users without an organization (a superadmin) cannot generate.
 
 Large orders are generated in parts of ``GENERATE_CHUNK_ROWS`` rows. The page
 asks for one part at a time and sends the whole file with every request; the
-server keeps nothing between requests.
+server keeps no file data between requests.
 
 Never log request bodies, uploaded filenames, or cell values.
 """
@@ -33,12 +41,17 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, Response
 from python_multipart.exceptions import FormParserError
 from python_multipart.multipart import MultipartParser, parse_options_header
+from sqlalchemy.orm import Session, sessionmaker
 
+from app import batches
+from app.auth.accounts import CurrentUser
+from app.batches import Continuation, UsedSummary
 from app.core import pipeline, sheets
 from app.core.models import Branding, ParseError, ValidationReport
 from app.core.parser import MAX_ROWS, SUPPORTED_EXTENSIONS
-from app.core.pipeline import PartError, check_upload, process_upload
-from app.web.auth import require_user
+from app.core.pipeline import PartError, check_upload
+from app.db.models import BatchStatus
+from app.web.auth import require_user, sessions_of, utc_now
 from app.web.templating import templates
 
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024
@@ -67,6 +80,8 @@ BUSY_RETRY_AFTER_SECONDS = 60
 
 MAX_ISSUES_SHOWN = 200  # rows of the issue table; the summary always counts them all
 _PART_NUMBER = re.compile(r"[0-9]{1,4}")  # ASCII digits only
+_BATCH_ID = re.compile(r"[0-9]{1,19}")  # ASCII digits only
+MAX_BATCH_ID = 2**63 - 1  # bigint
 
 _HEX_COLOUR = re.compile(r"#[0-9a-fA-F]{6}")
 # The browser's local date and time as DDMMYYYY_HHMM, used in the ZIP filename.
@@ -105,6 +120,9 @@ MSG_COMPANY_LONG = f"The company name can be at most {MAX_COMPANY_CHARS} charact
 MSG_FOOTER_LONG = f"The footer text can be at most {MAX_FOOTER_CHARS} characters."
 MSG_BAD_COLOUR = "The primary colour must be a hex colour such as #1A4D8F."
 MSG_CONTROL_CHARS = "Company name and footer text must not contain control characters."
+MSG_NO_ORGANIZATION = "Generating PDFs needs an account in an organization."
+MSG_NO_BATCH = "The download is missing its file check. Choose the file again."
+MSG_BATCH_GONE = "This upload is no longer available. Choose the file again."
 
 # Every route here needs a logged-in user, and every POST the session's CSRF token.
 router = APIRouter(dependencies=[Depends(require_user)])
@@ -137,15 +155,28 @@ class UploadForm:
 
 @dataclass(frozen=True, slots=True)
 class Results:
-    """What the results partial shows: row count, number of parts, validation report."""
+    """What the results partial shows: row count, number of parts, validation report,
+    the rows used by earlier batches (if any) and, for a file that passed, its batch id.
+    ``continuation`` is set when the file continues an unfinished batch (its id is
+    ``batch_id`` then)."""
 
     row_count: int
     report: ValidationReport
+    used: UsedSummary | None = None
+    batch_id: int | None = None
+    continuation: Continuation | None = None
+
+    @property
+    def chunk_rows(self) -> int:
+        """Rows per part: the continued batch's own size, else ``GENERATE_CHUNK_ROWS``."""
+        if self.continuation is not None:
+            return self.continuation.chunk_rows
+        return pipeline.GENERATE_CHUNK_ROWS
 
     @property
     def parts(self) -> int:
-        """How many ZIP files (parts of ``GENERATE_CHUNK_ROWS`` rows) the upload needs."""
-        return pipeline.part_count(self.row_count)
+        """How many ZIP files (parts of ``chunk_rows`` rows) the upload needs."""
+        return pipeline.part_count(self.row_count, self.chunk_rows)
 
 
 @lru_cache(maxsize=1)
@@ -408,6 +439,14 @@ def _batch_stamp(form: UploadForm) -> str:
     return datetime.now(UTC).strftime(STAMP_FORMAT)
 
 
+def _batch_id(form: UploadForm) -> int:
+    """The ``batch_id`` field. Raises ``UploadRejected`` (400) when missing or malformed."""
+    value = form.fields.get("batch_id", "")
+    if not _BATCH_ID.fullmatch(value) or not 1 <= int(value) <= MAX_BATCH_ID:
+        raise UploadRejected(400, MSG_NO_BATCH)
+    return int(value)
+
+
 def _part_number(form: UploadForm, field: str) -> int:
     """A part field as an integer; 1 when absent. Raises ``UploadRejected`` (400)."""
     value = form.fields.get(field)
@@ -426,17 +465,139 @@ def _zip_filename(stamp: str, part: int, parts: int) -> str:
     return f"esim_batch_{stamp}_part{part:0{width}d}of{parts:0{width}d}.zip"
 
 
-def _check(upload: UploadedFile) -> Results:
-    """Parse and validate only. Raises ``ParseError``."""
+def _fingerprint_key(request: Request) -> bytes:
+    key = request.app.state.settings.fingerprint_key
+    if key is None:  # create_app refuses to start without it
+        raise RuntimeError("FINGERPRINT_KEY is not set")
+    return key.reveal().encode("utf-8")
+
+
+def _check(
+    sessions: sessionmaker[Session],
+    key: bytes,
+    user: CurrentUser,
+    organization_id: int,
+    upload: UploadedFile,
+    now: datetime,
+) -> Results:
+    """Parse, validate, check against earlier batches; a file that passes gets a batch.
+
+    A file whose only duplicates are an unfinished batch's own rows, in the same parts,
+    continues that batch (``batches.continuable``): no new batch, the old id is reused.
+    Raises ``ParseError``.
+    """
     parsed, report = check_upload(upload.data, upload.filename)
     if not parsed.records:
         raise ParseError(MSG_NO_ROWS)
-    return Results(row_count=len(parsed.records), report=report)
+    row_count = len(parsed.records)
+    with sessions.begin() as db:
+        used = batches.find_used(db, organization_id, report.valid, key=key, now=now)
+        continuation = batches.continuable(db, organization_id, report, used, row_count=row_count)
+        if continuation is not None:
+            return Results(
+                row_count=row_count,
+                report=report,
+                batch_id=continuation.batch_id,
+                continuation=continuation,
+            )
+        report = batches.merge(report, used)
+        batch_id = None
+        if report.ok:
+            batch_id = batches.create_batch(
+                db,
+                organization_id=organization_id,
+                user_id=user.user_id,
+                file_name=upload.filename,
+                row_count=row_count,
+                parts=pipeline.part_count(row_count),
+                warning_count=len(report.warnings),
+                now=now,
+            )
+    return Results(row_count=row_count, report=report, used=used.summary, batch_id=batch_id)
 
 
-def _row_count(report: ValidationReport) -> int:
-    """Rows read: valid records plus records excluded for errors."""
-    return len(report.valid) + len({issue.row_number for issue in report.errors})
+class BatchGone(Exception):
+    """The batch does not exist or belongs to another organization."""
+
+
+MSG_BATCH_VOIDED = "This batch was voided. Choose the file again."
+
+
+@dataclass(frozen=True, slots=True)
+class PartOutcome:
+    """A generated part (``archive``), or the results to show instead (``archive is None``)."""
+
+    results: Results
+    archive: bytes | None
+
+
+def _generate_part(
+    sessions: sessionmaker[Session],
+    key: bytes,
+    organization_id: int,
+    batch_id: int,
+    upload: UploadedFile,
+    branding: Branding,
+    part: int,
+    parts: int,
+    now: datetime,
+) -> PartOutcome:
+    """Validate the whole upload again (including earlier batches), render one part and
+    record it on the batch. Errors mark the batch ``failed``.
+
+    Every part uses the batch's own part size (``Batch.chunk_rows``), so a batch made
+    before ``GENERATE_CHUNK_ROWS`` changed keeps its parts.
+
+    Raises ``BatchGone``, ``batches.BatchVoided``, ``PartError`` (also when the file does
+    not match the batch's row count) and ``ParseError``. No database connection is held
+    while PDFs render.
+    """
+    with sessions.begin() as db:
+        batch = batches.scoped_batch(db, organization_id, batch_id)
+        if batch is None:
+            raise BatchGone
+        if batch.status == BatchStatus.VOIDED:
+            raise batches.BatchVoided
+        expected = (batch.row_count, batch.parts)
+        chunk_rows = batch.chunk_rows
+    if not 1 <= part <= parts:
+        raise PartError(f"Part {part} of {parts} does not exist.")
+    parsed, report = check_upload(upload.data, upload.filename)
+    pipeline.check_part(parsed, part, parts, chunk_rows)
+    row_count = len(parsed.records)
+    if (row_count, parts) != expected:
+        raise PartError("The upload does not match its batch.")
+
+    used = batches.NOTHING_USED
+    if report.ok:
+        with sessions.begin() as db:
+            used = batches.find_used(
+                db, organization_id, report.valid, key=key, now=now, exclude_batch_id=batch_id
+            )
+        report = batches.merge(report, used)
+    if not report.ok:
+        with sessions.begin() as db:
+            batches.mark_failed(db, organization_id, batch_id, report)
+        return PartOutcome(Results(row_count, report, used.summary), None)
+    if not report.valid:
+        return PartOutcome(Results(row_count, report), None)
+
+    archive = pipeline.build_part(parsed, report, branding, part=part, chunk_rows=chunk_rows)
+    with sessions.begin() as db:
+        race = batches.record_part(  # raises BatchVoided if voided meanwhile
+            db,
+            organization_id,
+            batch_id,
+            part,
+            pipeline.part_records(report, part, chunk_rows),
+            key=key,
+            now=now,
+        )
+        if race.found:  # another batch generated the same codes meanwhile
+            report = batches.merge(report, race)
+            batches.mark_failed(db, organization_id, batch_id, report)
+            return PartOutcome(Results(row_count, report, race.summary), None)
+    return PartOutcome(Results(row_count, report), archive)
 
 
 # --- Responses -----------------------------------------------------------------
@@ -520,11 +681,16 @@ def _partial(request: Request, status_code: int = 200, **extra: Any) -> HTMLResp
 # --- Routes --------------------------------------------------------------------
 
 
+User = Annotated[CurrentUser, Depends(require_user)]
+
+
 @router.get("/", response_class=HTMLResponse)
 async def index(
-    request: Request, defaults: Annotated[Branding, Depends(get_branding)]
+    request: Request, defaults: Annotated[Branding, Depends(get_branding)], user: User
 ) -> HTMLResponse:
-    """GET /: render the upload form."""
+    """GET /: render the upload form (a message instead for users without an organization)."""
+    if user.organization_id is None:
+        return _page(request, _form_values(defaults), no_organization=MSG_NO_ORGANIZATION)
     return _page(request, _form_values(defaults))
 
 
@@ -548,14 +714,26 @@ async def template_xlsx() -> Response:
 
 
 @router.post("/validate", response_class=HTMLResponse)
-async def validate_upload(request: Request) -> HTMLResponse:
-    """POST /validate (HTMX): parse and validate only; return the ``_results.html`` partial."""
+async def validate_upload(request: Request, user: User) -> HTMLResponse:
+    """POST /validate (HTMX): parse, validate, check against earlier batches; return the
+    ``_results.html`` partial. A file that passes gets a batch, whose id the partial puts
+    into the form for /generate."""
+    if user.organization_id is None:
+        return _partial(request, 403, error=MSG_NO_ORGANIZATION)
     try:
         upload = _data_file(await read_capped(request))
     except UploadRejected as exc:
         return _partial(request, exc.status_code, error=exc.message)
     try:
-        results = await run_in_threadpool(_check, upload)
+        results = await run_in_threadpool(
+            _check,
+            sessions_of(request),
+            _fingerprint_key(request),
+            user,
+            user.organization_id,
+            upload,
+            utc_now(),
+        )
     except ParseError as exc:
         return _partial(request, error=str(exc))
     return _partial(request, results=results)
@@ -563,18 +741,21 @@ async def validate_upload(request: Request) -> HTMLResponse:
 
 @router.post("/generate", response_model=None)
 async def generate(
-    request: Request, defaults: Annotated[Branding, Depends(get_branding)]
+    request: Request, defaults: Annotated[Branding, Depends(get_branding)], user: User
 ) -> Response:
     """POST /generate: validate the whole upload, then build the ZIP for one part of it.
 
-    The form fields ``part`` (1-based) and ``parts`` say which part; both default
-    to 1, which is right for uploads of up to ``GENERATE_CHUNK_ROWS`` rows. The
-    page's script requests the parts one after another.
+    The form field ``batch_id`` (from /validate) is required. The fields ``part``
+    (1-based) and ``parts`` say which part; both default to 1, which is right for
+    uploads of up to ``GENERATE_CHUNK_ROWS`` rows. The page's script requests the
+    parts one after another.
 
-    Returns the ZIP when every row of the upload is valid, otherwise the full
-    page with the results table (422), the reason the request was rejected
-    (400/413, including a part that does not match the file), or a busy message
-    (503) when no job slot frees up within ``JOB_WAIT_SECONDS``.
+    Returns the ZIP when every row of the upload is valid and none was generated by
+    another batch. Otherwise: the full page with the results table (422; the batch is
+    marked failed), the reason the request was rejected (400/413, including a missing
+    batch id and a part or file that does not match the batch), 404 for a batch that is
+    not the organization's or no longer exists, or a busy message (503) when no job slot
+    frees up within ``JOB_WAIT_SECONDS``.
 
     The pipeline runs in a worker thread. The slot is held until that thread
     finishes, even if the client disconnects: the thread call is not abandoned
@@ -585,10 +766,14 @@ async def generate(
         form = await read_capped(request)
         form_values = _form_values(defaults, form)
         upload = _data_file(form)
+        batch_id = _batch_id(form)
         part, parts = _part_number(form, "part"), _part_number(form, "parts")
         branding = _branding(form, defaults)
     except UploadRejected as exc:
         return _page(request, form_values, exc.status_code, error=exc.message)
+    organization_id = user.organization_id
+    if organization_id is None:
+        return _page(request, form_values, 404, error=MSG_BATCH_GONE)
 
     slots = _generate_slots()
     try:
@@ -596,20 +781,33 @@ async def generate(
     except TimeoutError:
         return _page(request, form_values, 503, error=MSG_BUSY)
     try:
-        report, archive = await run_in_threadpool(
-            process_upload, upload.data, upload.filename, branding, part=part, parts=parts
+        outcome = await run_in_threadpool(
+            _generate_part,
+            sessions_of(request),
+            _fingerprint_key(request),
+            organization_id,
+            batch_id,
+            upload,
+            branding,
+            part,
+            parts,
+            utc_now(),
         )
+    except BatchGone:
+        return _page(request, form_values, 404, error=MSG_BATCH_GONE)
+    except batches.BatchVoided:  # the user's own organization's batch: no 404 needed
+        return _page(request, form_values, 409, error=MSG_BATCH_VOIDED)
     except ParseError as exc:
         return _page(request, form_values, 422, error=str(exc))
     except PartError:
         return _page(request, form_values, 400, error=MSG_BAD_PART)
     finally:
         slots.release()
+    archive = outcome.archive
     if archive is None:
-        results = Results(row_count=_row_count(report), report=report)
-        return _page(request, form_values, 422, results=results)
-    if not report.valid:
-        return _page(request, form_values, 422, error=MSG_NO_ROWS)
+        if outcome.results.report.ok:  # no errors, but no valid rows either
+            return _page(request, form_values, 422, error=MSG_NO_ROWS)
+        return _page(request, form_values, 422, results=outcome.results)
 
     filename = _zip_filename(_batch_stamp(form), part, parts)
     return Response(

@@ -18,6 +18,10 @@ from app.db.models import (
     AccessRequestStatus,
     AuditLog,
     AuditOutcome,
+    Batch,
+    BatchStatus,
+    CodeFingerprint,
+    FingerprintKind,
     Invite,
     PasswordToken,
     UserSession,
@@ -129,6 +133,10 @@ def test_purge_deletes_exactly_the_old_rows(accts: Accounts) -> None:
         "sessions": 2,
         "invites": 2,
         "password_tokens": 2,
+        # Batches and fingerprints: see test_purge_ages_batches_and_fingerprints.
+        "code_fingerprints": 0,
+        "batches_incomplete": 0,
+        "batches_unused": 0,
     }
     for table, ids in keep.items():
         survivors = _ids(accts, table)
@@ -142,6 +150,67 @@ def test_purge_deletes_exactly_the_old_rows(accts: Accounts) -> None:
     # Nothing left to delete.
     again = accts.run(lambda db: retention.purge(db, now=NOW))
     assert set(again.values()) == {0}
+
+
+def test_purge_ages_batches_and_fingerprints(accts: Accounts) -> None:
+    """Fingerprints: 12 months. Batches: partial -> incomplete and validated -> deleted
+    24 hours after they were created; completed, failed and incomplete ones stay."""
+    org_id = accts.org()
+    user_id = accts.user("user@org.test", org_id=org_id)
+
+    def _add(db: Session) -> dict[str, int]:
+        def batch(status: BatchStatus, age: timedelta, parts_downloaded: int = 0) -> int:
+            row = Batch(
+                organization_id=org_id,
+                user_id=user_id,
+                created_at=NOW - age,
+                file_name="orders.csv",
+                row_count=10,
+                parts=2,
+                parts_downloaded=parts_downloaded,
+                status=status,
+            )
+            db.add(row)
+            db.flush()
+            return row.id
+
+        ids = {
+            "partial_old": batch(BatchStatus.PARTIAL, DAY + MIN, 1),
+            "partial_new": batch(BatchStatus.PARTIAL, DAY - MIN, 1),
+            "validated_old": batch(BatchStatus.VALIDATED, DAY + MIN),
+            "validated_new": batch(BatchStatus.VALIDATED, DAY - MIN),
+            "completed_old": batch(BatchStatus.COMPLETED, 400 * DAY, 2),
+            "failed_old": batch(BatchStatus.FAILED, 30 * DAY),
+            "incomplete_old": batch(BatchStatus.INCOMPLETE, 30 * DAY, 1),
+        }
+        for n, age in enumerate((365 * DAY + MIN, 365 * DAY - MIN)):
+            db.add(
+                CodeFingerprint(
+                    organization_id=org_id,
+                    kind=FingerprintKind.ICCID,
+                    fingerprint=bytes([n + 1]) * 32,
+                    batch_id=ids["completed_old"],
+                    created_at=NOW - age,
+                )
+            )
+        return ids
+
+    ids = accts.run(_add)
+    counts = accts.run(lambda db: retention.purge(db, now=NOW))
+    assert (counts["code_fingerprints"], counts["batches_incomplete"]) == (1, 1)
+    assert counts["batches_unused"] == 1
+    status = dict(accts.sql("SELECT id, status FROM batches"))
+    assert ids["validated_old"] not in status
+    assert {name: status[i] for name, i in ids.items() if i in status} == {
+        "partial_old": "incomplete",
+        "partial_new": "partial",
+        "validated_new": "validated",
+        "completed_old": "completed",
+        "failed_old": "failed",
+        "incomplete_old": "incomplete",
+    }
+    remaining = accts.sql("SELECT created_at FROM code_fingerprints")
+    assert [row[0] for row in remaining] == [NOW - (365 * DAY - MIN)]
 
 
 def test_purge_if_due_runs_once_per_utc_day(accts: Accounts) -> None:
@@ -172,6 +241,9 @@ def test_cli_purge_prints_counts_only(
         "sessions",
         "invites",
         "password_tokens",
+        "code_fingerprints",
+        "batches_incomplete",
+        "batches_unused",
     ]
 
 

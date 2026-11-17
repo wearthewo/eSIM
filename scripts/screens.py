@@ -40,17 +40,21 @@ from alembic import command  # noqa: E402
 from alembic.config import Config  # noqa: E402
 from make_big_csv import make_csv  # noqa: E402
 from playwright.sync_api import BrowserContext, Page, sync_playwright  # noqa: E402
-from sqlalchemy import Engine, text  # noqa: E402
+from sqlalchemy import Engine, select, text  # noqa: E402
 from sqlalchemy.engine import make_url  # noqa: E402
 from sqlalchemy.orm import Session, sessionmaker  # noqa: E402
 
+from app import batches  # noqa: E402
 from app.auth import accounts  # noqa: E402
 from app.auth.passwords import hash_password  # noqa: E402
+from app.core.pipeline import check_upload, part_count, part_records  # noqa: E402
 from app.db.base import Base  # noqa: E402
 from app.db.engine import make_engine  # noqa: E402
 from app.db.models import (  # noqa: E402
     AccessRequest,
     AccessRequestStatus,
+    Batch,
+    BatchStatus,
     Organization,
     Role,
     Usage,
@@ -68,6 +72,13 @@ ADMIN_EMAIL = "admin@platform.test"
 OWNER_EMAIL = "owner@demo-mobile.test"
 WRONG_PASSWORD = "not the password"  # noqa: S105  (synthetic, for the login error state)
 MULTI_PART_ROWS = 1_200  # three parts of 500: shows the progress bar part-way
+CONTINUE_ROWS = 1_200  # the unfinished batch: part 1 of 3 downloaded
+
+
+def continue_csv() -> bytes:
+    """The unfinished batch's file (other rows than the multi-part shots use)."""
+    return make_csv(CONTINUE_ROWS, first_key=90_001)
+
 
 # The parts list (download parts one by one): as in a browser without the File System
 # Access API.
@@ -128,7 +139,7 @@ class Seeded:
     owner_token: str
 
 
-def seed(engine: Engine, sessions: sessionmaker[Session]) -> Seeded:
+def seed(engine: Engine, sessions: sessionmaker[Session], key: bytes) -> Seeded:
     """Empty the test database and add a small synthetic world."""
     tables = ", ".join(t.name for t in Base.metadata.sorted_tables)
     with engine.begin() as conn:
@@ -206,6 +217,52 @@ def seed(engine: Engine, sessions: sessionmaker[Session]) -> Seeded:
                 ),
             ]
         )
+        db.flush()
+        ops = db.scalars(select(User).where(User.email == "ops@demo-mobile.test")).one()
+        # History: every status that is listed, in both organizations (metadata only).
+        history = [
+            (org.id, owner.id, "orders_november.xlsx", 1_200, 3, 3, 0, BatchStatus.COMPLETED, 2),
+            (org.id, ops.id, "travel_esims_week47.csv", 10_000, 20, 7, 0, BatchStatus.PARTIAL, 5),
+            (org.id, owner.id, "retail_partners.csv", 2_400, 5, 2, 3, BatchStatus.INCOMPLETE, 50),
+            (org.id, ops.id, "reorder_march.csv", 40, 1, 0, 0, BatchStatus.FAILED, 75),
+            (org.id, owner.id, "pilot_batch.csv", 25, 1, 1, 1, BatchStatus.COMPLETED, 200),
+            (org.id, None, "imported_october.csv", 300, 1, 1, 0, BatchStatus.COMPLETED, 400),
+            (other.id, None, "northwind_q4.xlsx", 4_000, 8, 8, 0, BatchStatus.COMPLETED, 30),
+            (org.id, owner.id, "sent_by_mistake.csv", 600, 2, 2, 0, BatchStatus.VOIDED, 120),
+        ]
+        for org_ref, user_ref, name, rows, parts, done, warnings, status, hours in history:
+            voided = status == BatchStatus.VOIDED
+            db.add(
+                Batch(
+                    organization_id=org_ref,
+                    user_id=user_ref,
+                    created_at=now - timedelta(hours=hours),
+                    file_name=name,
+                    row_count=rows,
+                    parts=parts,
+                    parts_downloaded=done,
+                    warning_count=warnings,
+                    error_count=2 if status == BatchStatus.FAILED else 0,
+                    status=status,
+                    voided_at=now - timedelta(hours=hours - 1) if voided else None,
+                    voided_by=owner.id if voided else None,
+                )
+            )
+        db.flush()
+        # An unfinished batch with real fingerprints for part 1, so that uploading
+        # continue_csv() shows "Continue this batch" (upload-continue).
+        _, report = check_upload(continue_csv(), "x.csv")
+        unfinished = batches.create_batch(
+            db,
+            organization_id=org.id,
+            user_id=owner.id,
+            file_name="orders_week46.csv",
+            row_count=CONTINUE_ROWS,
+            parts=part_count(CONTINUE_ROWS),
+            warning_count=0,
+            now=now - timedelta(hours=3),
+        )
+        batches.record_part(db, org.id, unfinished, 1, part_records(report, 1), key=key, now=now)
         db.flush()
         org_id, admin_id, owner_id = org.id, admin.id, owner.id
     with sessions.begin() as db:
@@ -334,6 +391,8 @@ def owner_pages(p: Pass, page: Page) -> None:
     p.shot(page, "upload-warnings")
     upload(page, "valid_full.csv")
     p.shot(page, "upload-valid")
+    upload(page, "orders_week46.csv", continue_csv())  # the seeded unfinished batch's file
+    p.shot(page, "upload-continue")
 
     shots = (
         "upload-done",
@@ -376,6 +435,26 @@ def owner_pages(p: Pass, page: Page) -> None:
 
     page.goto(f"{p.base}/team")
     p.shot(page, "team")
+    history_pages(p, page)
+
+
+def history_pages(p: Pass, page: Page) -> None:
+    """History: the list, the calendar opened by keyboard, and a date error."""
+    page.goto(f"{p.base}/history")
+    p.shot(page, "history")
+    if p.wants("history-calendar"):
+        page.focus("#from_date")
+        page.keyboard.press("Tab")
+        page.keyboard.press("Enter")
+        page.wait_for_selector(".datepicker-popup")
+        page.keyboard.press("ArrowRight")
+        p.shot(page, "history-calendar")
+        page.keyboard.press("Escape")
+    page.click("a:has-text('Void batch')")  # the newest batch that can be voided
+    page.wait_for_selector("#confirm_not_sent")
+    p.shot(page, "history-void-confirm")
+    page.goto(f"{p.base}/history?from_date=31/02/2026&to_date=")
+    p.shot(page, "history-error")
 
 
 def admin_pages(p: Pass, page: Page, anon: Page) -> None:
@@ -387,6 +466,10 @@ def admin_pages(p: Pass, page: Page, anon: Page) -> None:
     p.shot(page, "admin-requests")
     page.goto(f"{p.base}/admin/requests?show=handled")
     p.shot(page, "admin-requests-handled")
+    page.goto(f"{p.base}/history")
+    p.shot(page, "admin-history")
+    page.goto(f"{p.base}/")
+    p.shot(page, "admin-upload-no-organization")
 
     # An invite through the real form: the one-time link page, then the link itself.
     page.goto(f"{p.base}/admin/orgs/{p.seeded.org_id}")
@@ -434,11 +517,12 @@ def main() -> int:
     sessions = sessionmaker(bind=engine, expire_on_commit=False)
     port = free_port()
     base = f"http://127.0.0.1:{port}"
+    fingerprint_key = secrets.token_urlsafe(48).encode()
     settings = Settings(
         env="development",
         database_url=Secret(engine.url.render_as_string(hide_password=False)),
         secret_key=Secret(secrets.token_urlsafe(48)),
-        fingerprint_key=Secret(secrets.token_urlsafe(48)),
+        fingerprint_key=Secret(fingerprint_key.decode()),
         public_base_url=base,
     )
     server = start_server(settings, sessions, port)
@@ -459,7 +543,7 @@ def main() -> int:
                             base=base,
                             viewport=viewport,
                             dark=dark,
-                            seeded=seed(engine, sessions),
+                            seeded=seed(engine, sessions, fingerprint_key),
                             only=only,
                             generate=not opts.skip_generate and not dark,
                         ),

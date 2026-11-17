@@ -18,6 +18,8 @@ from typing import Any
 from fastapi import Request
 from fastapi.templating import Jinja2Templates
 
+from app.localtime import format_athens
+
 TEMPLATES_DIR: Path = Path(__file__).parent / "templates"
 
 
@@ -38,3 +40,4 @@ def _utc(value: datetime | None) -> str:
 
 templates = Jinja2Templates(directory=TEMPLATES_DIR, context_processors=[_auth_context])
 templates.env.filters["utc"] = _utc
+templates.env.filters["athens"] = format_athens  # dd/mm/yyyy HH:mm, Greek time

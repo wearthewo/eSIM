@@ -63,7 +63,14 @@ Tests pass, lint clean, only the requested module changed.
 - Every route that takes an ID (batch, user, invite, access request) must check it
   belongs to the current user's organization (or the user is superadmin). Return 404,
   not 403, for other organizations' IDs.
-- Batches are never deleted in normal use. Fingerprint retention will be decided in the
-  duplicate-detection step (today fingerprints are deleted with their batch).
+- Batches with generated parts are never deleted in normal use. Batches still "validated"
+  (checked, nothing generated) are deleted by the daily purge after 24 h; "partial" ones
+  become "incomplete" after 24 h. Fingerprints are kept 12 months (app/batches.py
+  DUPLICATE_WINDOW), then purged; they are also deleted with their batch.
+- Voiding a batch (owners for their organization, superadmin) deletes its fingerprints so its
+  codes are accepted again, keeps the history row (status voided, voided_at, voided_by) and
+  writes a batch_voided audit row. void() and record_part share the per-organization lock.
+- A batch keeps the part size it was created with (batches.chunk_rows); code working on an
+  existing batch must use it, never GENERATE_CHUNK_ROWS directly.
 - IDs in URLs. Sequential bigint IDs are fine, but the login step must check every request that takes an ID (batch, user, invite) against the user’s organization, so nobody can see another company’s data by changing /batches/41 to /batches/42
 - Never set the sqlalchemy loggers to DEBUG in production (they print row data, including emails).

@@ -21,6 +21,7 @@ TABLES = {
     "access_requests",
     "branding",
     "batches",
+    "batch_parts",
     "code_fingerprints",
     "audit_log",
     "usage",
@@ -37,6 +38,11 @@ FORBIDDEN_COLUMN_FRAGMENTS = (
     "file",
     "lpa",
 )
+# Columns allowed despite a forbidden fragment, each with the reason.
+ALLOWED_COLUMNS = {
+    # The uploaded file's sanitized name for the History page (requested), never its content.
+    "batches.file_name",
+}
 
 
 def _tables(conn: Connection) -> set[str]:
@@ -82,5 +88,6 @@ def test_no_column_could_hold_codes_files_or_customer_data() -> None:
         for table in Base.metadata.tables.values()
         for column in table.columns
         if any(fragment in column.name for fragment in FORBIDDEN_COLUMN_FRAGMENTS)
+        and f"{table.name}.{column.name}" not in ALLOWED_COLUMNS
     ]
     assert bad == []

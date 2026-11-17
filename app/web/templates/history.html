@@ -1,0 +1,121 @@
+{% extends "base.html" %}
+{% block title %}History · eSIM PDF generator{% endblock %}
+{# Batches, newest first. Times are Greek time (Europe/Athens), dd/mm/yyyy HH:mm, 24-hour.
+   app.js adds a calendar button to every [data-datepicker] field; the text field stays
+   the value that is sent, so the form works without JavaScript too. #}
+{% block content %}
+{% set status_labels = {"partial": "Partial", "completed": "Completed", "incomplete": "Incomplete", "failed": "Failed", "voided": "Voided"} %}
+{% set status_badges = {"partial": "badge-info", "completed": "badge-success", "incomplete": "badge-warning", "failed": "badge-error", "voided": ""} %}
+<div class="page-header">
+  <div>
+    <h1>History</h1>
+    <p class="lead">
+      {% if is_admin %}Batches of every organization{% else %}Your organization's batches{% endif %},
+      newest first. Times are Greek time.
+    </p>
+  </div>
+</div>
+<p class="notice history-note">{{ note }}</p>
+
+<form method="get" action="/history" class="card history-filter" id="history-filter">
+  <div class="filter-grid">
+    <div class="field">
+      <label for="from_date">From date</label>
+      <div class="datepicker" data-datepicker>
+        <input id="from_date" name="from_date" type="text" inputmode="numeric" autocomplete="off"
+               placeholder="dd/mm/yyyy" maxlength="10" value="{{ fields.from_date }}" aria-describedby="date-format">
+      </div>
+    </div>
+    <div class="field time-field">
+      <label for="from_time">From time</label>
+      <input id="from_time" name="from_time" type="text" inputmode="numeric" autocomplete="off"
+             placeholder="HH:mm" maxlength="5" value="{{ fields.from_time }}" aria-describedby="date-format">
+    </div>
+    <div class="field">
+      <label for="to_date">To date</label>
+      <div class="datepicker" data-datepicker>
+        <input id="to_date" name="to_date" type="text" inputmode="numeric" autocomplete="off"
+               placeholder="dd/mm/yyyy" maxlength="10" value="{{ fields.to_date }}" aria-describedby="date-format">
+      </div>
+    </div>
+    <div class="field time-field">
+      <label for="to_time">To time</label>
+      <input id="to_time" name="to_time" type="text" inputmode="numeric" autocomplete="off"
+             placeholder="HH:mm" maxlength="5" value="{{ fields.to_time }}" aria-describedby="date-format">
+    </div>
+    {% if is_admin %}
+    <div class="field org-field">
+      <label for="org">Organization</label>
+      <select id="org" name="org">
+        <option value=""{% if not org %} selected{% endif %}>All organizations</option>
+        {% for org_id, org_name in orgs %}
+        <option value="{{ org_id }}"{% if org == org_id | string %} selected{% endif %}>{{ org_name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    {% endif %}
+    <div class="filter-actions">
+      <button type="submit" class="btn btn-primary">Show</button>
+    </div>
+  </div>
+  <p class="hint" id="date-format">Dates as dd/mm/yyyy, times as HH:mm (24-hour). Times are optional: From starts at 00:00, To without a time includes the whole day.</p>
+</form>
+
+{% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+
+{% if result %}
+<section class="card" aria-labelledby="batches-title">
+  <h2 id="batches-title" class="visually-hidden">Batches</h2>
+  {% if result.rows %}
+  <p class="summary history-count">{{ result.total }} batch{{ "" if result.total == 1 else "es" }}{% if result.pages > 1 %} · page {{ result.page }} of {{ result.pages }}{% endif %}</p>
+  <div class="table-wrap" tabindex="0" role="region" aria-label="Batches">
+  <table class="admin-table history-table">
+    <thead>
+      <tr>
+        <th scope="col">Date and time</th>
+        {% if is_admin %}<th scope="col">Organization</th>{% endif %}
+        <th scope="col">User</th>
+        <th scope="col">File name</th>
+        <th scope="col" class="num">Rows</th>
+        <th scope="col" class="num">Parts downloaded</th>
+        <th scope="col" class="num">Warnings</th>
+        <th scope="col">Status</th>
+        {% if can_void %}<th scope="col" class="num"><span class="visually-hidden">Actions</span></th>{% endif %}
+      </tr>
+    </thead>
+    <tbody>
+      {% for b in result.rows %}
+      <tr data-batch="{{ b.id }}">
+        <td class="muted">{{ b.created_at | athens }}</td>
+        {% if is_admin %}<td>{{ b.organization_name }}</td>{% endif %}
+        <td>{{ b.user_email or "—" }}</td>
+        <td class="file-name">{{ b.file_name }}</td>
+        <td class="num">{{ b.row_count }}</td>
+        <td class="num">{{ b.parts_downloaded }} / {{ b.parts }}</td>
+        <td class="num">{{ b.warning_count }}</td>
+        <td><span class="badge {{ status_badges[b.status.value] }}">{{ status_labels[b.status.value] }}{% if b.status.value == "incomplete" %}: {{ b.parts_downloaded }} / {{ b.parts }} parts{% endif %}</span>{% if b.voided %}<span class="voided-note">Voided by {{ b.voided_by_email or "a deleted user" }} on {{ b.voided_at | athens }}</span>{% endif %}</td>
+        {% if can_void %}<td class="actions">{% if not b.voided %}<a class="btn btn-sm btn-danger" href="/history/batches/{{ b.id }}/void">Void batch</a>{% endif %}</td>{% endif %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% if result.pages > 1 %}
+  {# Previous/Next send the same (already checked) filter again; no user input in an href. #}
+  <form method="get" action="/history" class="pagination" aria-label="Pages">
+    {% for name, value in fields.items() %}<input type="hidden" name="{{ name }}" value="{{ value }}">{% endfor %}
+    {% if is_admin %}<input type="hidden" name="org" value="{{ org }}">{% endif %}
+    <button type="submit" class="btn btn-sm" name="page" value="{{ result.page - 1 }}"{% if result.page <= 1 %} disabled{% endif %}>Previous</button>
+    <span class="muted">Page {{ result.page }} of {{ result.pages }}</span>
+    <button type="submit" class="btn btn-sm" name="page" value="{{ result.page + 1 }}"{% if result.page >= result.pages %} disabled{% endif %}>Next</button>
+  </form>
+  {% endif %}
+  {% else %}
+  <div class="empty-state history-empty">
+    <strong>No batches in this period</strong>
+    Batches appear here once a part has been downloaded. Change the dates to see older ones.
+  </div>
+  {% endif %}
+</section>
+{% endif %}
+{% endblock %}

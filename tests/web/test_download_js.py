@@ -15,11 +15,13 @@ from __future__ import annotations
 import re
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
 import pytest
 
 sync_api = pytest.importorskip("playwright.sync_api")
 
+from app.batches import Continuation  # noqa: E402
 from app.core.models import ValidationReport  # noqa: E402
 from app.web import routes  # noqa: E402
 from app.web.main import CONTENT_SECURITY_POLICY, STATIC_DIR  # noqa: E402
@@ -143,8 +145,25 @@ def render_index() -> str:
     )
 
 
-def render_results(rows: int) -> str:
-    results = routes.Results(row_count=rows, report=ValidationReport())
+def render_results(rows: int, downloaded: tuple[int, ...] | None = None) -> str:
+    """The check result; with ``downloaded``, the file continues an unfinished batch."""
+    continuation = None
+    if downloaded is not None:
+        continuation = Continuation(
+            batch_id=7,
+            file_name="order.csv",
+            created_at=datetime(2026, 11, 1, 9, 0, tzinfo=UTC),
+            parts=routes.pipeline.part_count(rows),
+            parts_downloaded=len(downloaded),
+            chunk_rows=CHUNK,
+            downloaded=downloaded,
+        )
+    results = routes.Results(
+        row_count=rows,
+        report=ValidationReport(),
+        batch_id=7 if continuation else None,
+        continuation=continuation,
+    )
     return templates.env.get_template("_results.html").render(routes._context(results=results))
 
 
@@ -161,6 +180,7 @@ class FakeServer:
     hold: set[int] = field(default_factory=set)
     fail_once: dict[int, tuple[int, str]] = field(default_factory=dict)
     held: list[tuple[Route, int, int]] = field(default_factory=list)
+    downloaded: tuple[int, ...] | None = None  # set: the upload continues a batch
 
     def handle(self, route: Route) -> None:
         request = route.request
@@ -171,7 +191,7 @@ class FakeServer:
         elif path.startswith("/static/"):
             route.fulfill(path=STATIC_DIR / path.removeprefix("/static/"))
         elif path == "/validate":
-            route.fulfill(body=render_results(self.rows), content_type="text/html")
+            route.fulfill(body=render_results(self.rows, self.downloaded), content_type="text/html")
         elif path == "/generate":
             body = request.post_data_buffer or b""
             part = int(re.search(rb'name="part"\r\n\r\n(\d+)', body).group(1))
@@ -266,7 +286,12 @@ class Harness:
         return [e for e in self.log() if e.startswith("click")]
 
 
-def make_harness(browser: sync_api.Browser, *scripts: str, rows: int) -> Iterator[Harness]:
+def make_harness(
+    browser: sync_api.Browser,
+    *scripts: str,
+    rows: int,
+    downloaded: tuple[int, ...] | None = None,
+) -> Iterator[Harness]:
     context = browser.new_context(accept_downloads=False)
     page = context.new_page()
     problems: list[str] = []
@@ -282,7 +307,7 @@ def make_harness(browser: sync_api.Browser, *scripts: str, rows: int) -> Iterato
     page.on("console", on_console)
     for script in scripts:
         page.add_init_script(script)
-    server = FakeServer(rows=rows)
+    server = FakeServer(rows=rows, downloaded=downloaded)
     page.route(f"{ORIGIN}/**", server.handle)
     page.goto(f"{ORIGIN}/")
     yield Harness(page, server, problems)
@@ -301,6 +326,12 @@ def folder_page(browser: sync_api.Browser) -> Iterator[Harness]:
 def plain_page(browser: sync_api.Browser) -> Iterator[Harness]:
     """Three parts, the last one partly filled; no folder API (e.g. Firefox, Safari)."""
     yield from make_harness(browser, FAKES, NO_FOLDER_API, rows=PLAIN_ROWS)
+
+
+@pytest.fixture
+def continue_page(browser: sync_api.Browser) -> Iterator[Harness]:
+    """Four parts of an unfinished batch, 1 and 3 downloaded before; folder API present."""
+    yield from make_harness(browser, FAKES, rows=4 * CHUNK, downloaded=(1, 3))
 
 
 def saved_in_order(parts: int) -> list[str]:
@@ -725,3 +756,40 @@ def test_cancel_a_single_part(plain_page: Harness) -> None:
     expect(h.page.locator("#retry")).to_have_text("Start again")
     h.page.click("#retry")
     expect(h.status()).to_have_text("Done: the ZIP file was generated; your browser is saving it.")
+
+
+# --- Continuing an unfinished batch -------------------------------------------------------
+
+
+def test_continuing_opens_the_parts_list_with_parts_marked(continue_page: Harness) -> None:
+    h = continue_page
+    h.upload_and_download()
+    expect(h.page.locator("#parts-manual")).to_be_visible()
+    assert "picker" not in h.log()  # no folder mode: the parts left are not in sequence
+    expect(h.status()).to_have_text(
+        "Continuing this batch: 2 of 4 parts were downloaded before. "
+        "Download the remaining parts one by one."
+    )
+    for n, status in (
+        (1, "Downloaded"),
+        (2, "Not downloaded"),
+        (3, "Downloaded"),
+        (4, "Not downloaded"),
+    ):
+        expect(h.part_status(n)).to_have_text(status)
+    expect(h.part_button(1)).to_have_text("Download again")
+    expect(h.part_button(2)).to_have_text("Download")
+    assert h.bar() == (2, 4)
+
+    h.page.click("#next-part")  # the first part not downloaded
+    expect(h.part_status(2)).to_have_text("Downloaded")
+    expect(h.page.locator("#next-part")).to_be_enabled()
+    h.page.click("#next-part")
+    expect(h.status()).to_have_text("Done: all 4 parts were downloaded.")
+    assert h.fetches() == ["fetch 2", "fetch 4"]
+    assert h.clicks() == [f"click {zip_name(2, 4)}", f"click {zip_name(4, 4)}"]
+
+    h.download_part(1)  # download again
+    expect(h.part_button(1)).to_be_enabled()
+    expect(h.status()).to_contain_text("Done: all 4 parts were downloaded.")
+    assert h.fetches() == ["fetch 2", "fetch 4", "fetch 1"]

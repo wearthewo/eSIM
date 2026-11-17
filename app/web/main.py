@@ -37,7 +37,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from app.auth import retention
 from app.db.engine import make_engine
 from app.settings import Settings, check_web_settings, get_settings
-from app.web import admin, auth, public, team
+from app.web import admin, auth, history, public, team
 from app.web.routes import router
 
 RETENTION_CHECK_SECONDS = 60 * 60
@@ -177,6 +177,7 @@ def create_app(
     app.include_router(public.router)
     app.include_router(admin.router)
     app.include_router(team.router)
+    app.include_router(history.router)
     app.include_router(router)
     auth.install_log_redaction()
     return app
