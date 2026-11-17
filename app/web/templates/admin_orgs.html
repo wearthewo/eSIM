@@ -1,26 +1,41 @@
 {% extends "base.html" %}
 {% block title %}Organizations · Admin{% endblock %}
 {% block content %}
-<h1>Organizations</h1>
-<p><a href="/admin/requests">Access requests ({{ pending_requests }} pending)</a></p>
+<div class="page-header">
+  <div>
+    <h1>Organizations</h1>
+    <p class="lead">Usage today and daily quotas, in rows per UTC day.</p>
+  </div>
+  <div class="page-actions">
+    <a class="btn" href="/admin/requests">Access requests ({{ pending_requests }} pending)</a>
+  </div>
+</div>
 {% if not orgs %}
-<p>No organizations yet.</p>
+<div class="empty-state">
+  <strong>No organizations yet.</strong>
+  Approve an access request to create the first one.
+</div>
 {% else %}
-<table class="admin-table">
-  <thead>
-    <tr><th>Name</th><th>Users</th><th>Rows today (UTC)</th><th>Daily quota</th><th>Status</th></tr>
-  </thead>
-  <tbody>
-    {% for o in orgs %}
-    <tr>
-      <td><a href="/admin/orgs/{{ o.id }}">{{ o.name }}</a></td>
-      <td>{{ o.user_count }}</td>
-      <td>{{ "{:,}".format(o.rows_today) }}</td>
-      <td>{{ "{:,}".format(o.daily_row_quota) }}</td>
-      <td>{% if o.disabled %}<strong>disabled</strong>{% else %}enabled{% endif %}</td>
-    </tr>
-    {% endfor %}
-  </tbody>
-</table>
+<section class="card">
+  <div class="table-wrap" tabindex="0" role="region" aria-label="Organizations">
+  {# Columns 2-4 are right-aligned by app.css (.orgs-table); the cells stay plain <td>. #}
+  <table class="admin-table orgs-table">
+    <thead>
+      <tr><th>Name</th><th>Users</th><th>Rows today (UTC)</th><th>Daily quota</th><th>Status</th></tr>
+    </thead>
+    <tbody>
+      {% for o in orgs %}
+      <tr>
+        <td><a href="/admin/orgs/{{ o.id }}">{{ o.name }}</a></td>
+        <td>{{ o.user_count }}</td>
+        <td>{{ "{:,}".format(o.rows_today) }}</td>
+        <td>{{ "{:,}".format(o.daily_row_quota) }}</td>
+        <td>{% if o.disabled %}<span class="badge badge-error">disabled</span>{% else %}<span class="badge badge-success">enabled</span>{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</section>
 {% endif %}
 {% endblock %}

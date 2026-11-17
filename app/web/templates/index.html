@@ -1,58 +1,80 @@
 {% extends "base.html" %}
 {% block content %}
-<h1>eSIM PDF generator</h1>
-<p>
-  Upload a CSV or XLSX file of eSIM activation codes (up to {{ max_rows }} rows,
-  {{ max_upload_mb }} MB). Each row becomes a branded PDF with a QR code, and you
-  download them as a ZIP file. Orders over {{ chunk_rows }} rows are generated in
-  parts of {{ chunk_rows }} rows, one ZIP file per part.
-</p>
-<p>
-  Start from the template, which has every column and keeps long numbers such as
-  ICCIDs as text: <a href="/template.xlsx" download>Download template (Excel)</a>
-</p>
-<p>
-  Each ZIP file includes <code>manifest.xlsx</code> (row, ICCID, PDF file name).
-  Add an optional <code>email</code> column to also get <code>mailmerge.xlsx</code>
-  (email, customer name, plan, ICCID, PDF file name) for your own mail merge.
-  This site never sends email.
-</p>
-<p class="notice">
-  Files are processed in memory and never stored. Nothing you upload is saved,
-  logged or kept after the response is sent.
-</p>
+<div class="page-header">
+  <div>
+    <h1>Create eSIM PDFs</h1>
+    <p class="lead">
+      Upload a CSV or XLSX file of eSIM activation codes (up to {{ max_rows }} rows,
+      {{ max_upload_mb }} MB). Each row becomes a branded PDF with a QR code, and you
+      download them as a ZIP file. Orders over {{ chunk_rows }} rows are generated in
+      parts of {{ chunk_rows }} rows, one ZIP file per part.
+    </p>
+  </div>
+  <div class="page-actions">
+    <a href="/template.xlsx" download>Download template (Excel)</a>
+  </div>
+</div>
+
+<ol class="stepper" id="steps" aria-label="Steps">
+  <li class="step" data-step="1" aria-current="step"><span class="step-num">1</span><span class="step-label">Upload</span></li>
+  <li class="step" data-step="2"><span class="step-num">2</span><span class="step-label">Review</span></li>
+  <li class="step" data-step="3"><span class="step-num">3</span><span class="step-label">Download</span></li>
+</ol>
 
 <form id="generate-form" action="/generate" method="post" enctype="multipart/form-data">
-  <fieldset>
-    <legend>Data file</legend>
-    <label for="file">CSV or XLSX file (max {{ max_upload_mb }} MB)</label>
-    <input id="file" type="file" name="file" accept=".csv,.xlsx" required
-           hx-post="/validate" hx-trigger="change" hx-params="file"
-           hx-encoding="multipart/form-data" hx-target="#results"
-           hx-indicator="#checking"
-           data-max-bytes="{{ max_upload_bytes }}"
-           data-too-large="The data file is larger than {{ max_upload_mb }} MB.">
-    <span id="checking" class="htmx-indicator" role="status">Checking file&hellip;</span>
-  </fieldset>
+  <div class="generate-grid">
+    <fieldset class="card">
+      <legend>Data file</legend>
+      <div class="dropzone" id="dropzone">
+        <span class="dropzone-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" focusable="false"><path d="M12 16V4"/><path d="m7 9 5-5 5 5"/><path d="M20 16v2a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-2"/></svg>
+        </span>
+        <label for="file">Drop your CSV or XLSX file here, or <span class="browse">browse</span></label>
+        <p class="dropzone-meta" id="file-limits">CSV or XLSX file (max {{ max_upload_mb }} MB, up to {{ max_rows }} rows)</p>
+        <input id="file" class="dropzone-input" type="file" name="file" accept=".csv,.xlsx" required
+               aria-describedby="file-limits file-name"
+               hx-post="/validate" hx-trigger="change" hx-params="file"
+               hx-encoding="multipart/form-data" hx-target="#results"
+               hx-indicator="#checking"
+               data-max-bytes="{{ max_upload_bytes }}"
+               data-too-large="The data file is larger than {{ max_upload_mb }} MB.">
+        <p class="dropzone-file" id="file-name"></p>
+      </div>
+      <span id="checking" class="htmx-indicator checking" role="status"><span class="spinner" aria-hidden="true"></span>Checking file&hellip;</span>
+      <p class="hint upload-help">
+        Start from the template, which has every column and keeps long numbers such as
+        ICCIDs as text.
+      </p>
+    </fieldset>
 
-  <fieldset>
-    <legend>Branding</legend>
-    <label for="company_name">Company name</label>
-    <input id="company_name" type="text" name="company_name" required
-           maxlength="{{ max_company_chars }}" value="{{ form.company_name }}">
+    <fieldset class="card">
+      <legend>Branding</legend>
+      <div class="field">
+        <label for="company_name">Company name</label>
+        <input id="company_name" type="text" name="company_name" required
+               maxlength="{{ max_company_chars }}" value="{{ form.company_name }}">
+      </div>
 
-    <label for="primary_color">Primary colour</label>
-    <input id="primary_color" type="color" name="primary_color" value="{{ form.primary_color }}">
+      <div class="field">
+        <label for="primary_color">Primary colour</label>
+        <input id="primary_color" type="color" name="primary_color" value="{{ form.primary_color }}">
+      </div>
 
-    <label for="logo">Logo (optional, PNG or JPEG, max {{ max_logo_kb }} KB)</label>
-    <input id="logo" type="file" name="logo" accept="image/png,image/jpeg"
-           data-max-bytes="{{ max_logo_bytes }}"
-           data-too-large="The logo is larger than {{ max_logo_kb }} KB.">
+      <div class="field">
+        <label for="logo">Logo <span class="optional">(optional)</span></label>
+        <input id="logo" type="file" name="logo" accept="image/png,image/jpeg" aria-describedby="logo-hint"
+               data-max-bytes="{{ max_logo_bytes }}"
+               data-too-large="The logo is larger than {{ max_logo_kb }} KB.">
+        <p class="hint" id="logo-hint">PNG or JPEG, max {{ max_logo_kb }} KB.</p>
+      </div>
 
-    <label for="footer_text">Footer text (optional)</label>
-    <input id="footer_text" type="text" name="footer_text"
-           maxlength="{{ max_footer_chars }}" value="{{ form.footer_text }}">
-  </fieldset>
+      <div class="field">
+        <label for="footer_text">Footer text <span class="optional">(optional)</span></label>
+        <input id="footer_text" type="text" name="footer_text"
+               maxlength="{{ max_footer_chars }}" value="{{ form.footer_text }}">
+      </div>
+    </fieldset>
+  </div>
 
   {# app.js sends this as the X-CSRF-Token header with every part request. #}
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -61,13 +83,59 @@
   <input type="hidden" name="part" value="1">
   <input type="hidden" name="parts" value="1">
 
-  <div id="results" aria-live="polite">
-    {% if error or results %}{% include "_results.html" %}{% endif %}
-  </div>
-  <div id="progress" hidden>
-    <p id="generating" role="status"></p>
-    <button type="button" id="cancel">Cancel</button>
-    <button type="button" id="retry" hidden>Retry</button>
-  </div>
+  <section class="card review-card" aria-labelledby="review-title">
+    <h2 id="review-title">Review and download</h2>
+    {# Kept empty (no whitespace) when there is nothing to show, so CSS can show the hint below. #}
+    <div id="results" aria-live="polite">{% if error or results %}{% include "_results.html" %}{% endif %}</div>
+    <div class="results-empty empty-state">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path d="m9 15 2 2 4-4"/></svg>
+      <strong>No file checked yet</strong>
+      Choose a data file above. Every row is checked before any PDF is made, and the
+      results appear here.
+    </div>
+    {# app.js: #choose-folder and #one-by-one appear before an order of several parts
+       when the browser can save into a folder (File System Access API). #part-list gets
+       one row per part, each with its own Download button, when the parts are downloaded
+       one by one (the user's choice, or a browser without that API). #}
+    <div id="progress" hidden>
+      <p id="generating" role="status"></p>
+      <progress id="progress-bar" max="1" value="0" aria-label="ZIP files done"></progress>
+      <div id="parts-manual" class="table-wrap" tabindex="0" role="region" aria-label="Parts" hidden>
+        <table id="part-list">
+          <thead><tr><th scope="col">Part</th><th scope="col">Status</th><th scope="col"><span class="visually-hidden">Download</span></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="progress-actions">
+        <button type="button" id="choose-folder" class="btn btn-primary" hidden>Choose a folder for the parts</button>
+        <button type="button" id="one-by-one" class="btn" hidden>Download parts one by one</button>
+        <button type="button" id="next-part" class="btn btn-primary" hidden>Download next part</button>
+        <button type="button" id="cancel" class="btn">Cancel</button>
+        <button type="button" id="retry" class="btn btn-primary" hidden>Retry</button>
+      </div>
+    </div>
+  </section>
 </form>
+
+<section class="card" aria-labelledby="about-title">
+  <h2 id="about-title">What you get</h2>
+  <div class="info-grid">
+    <div>
+      <h3>PDFs and a manifest</h3>
+      <p>
+        Each ZIP file includes <code>manifest.xlsx</code> (row, ICCID, PDF file name).
+        Add an optional <code>email</code> column to also get <code>mailmerge.xlsx</code>
+        (email, customer name, plan, ICCID, PDF file name) for your own mail merge.
+        This site never sends email.
+      </p>
+    </div>
+    <div>
+      <h3>Privacy</h3>
+      <p class="notice">
+        Files are processed in memory and never stored. Nothing you upload is saved,
+        logged or kept after the response is sent.
+      </p>
+    </div>
+  </div>
+</section>
 {% endblock %}

@@ -1,12 +1,14 @@
 {% extends "base.html" %}
 {% block title %}{{ heading }} · eSIM PDF generator{% endblock %}
 {% block content %}
-<h1>{{ heading }}</h1>
-<p>Send this link to <strong>{{ email }}</strong>. It works once and expires in 48 hours.</p>
-<p class="notice">This is the only time the link is shown. If it is lost, create a new one.</p>
-<p class="copy-row">
-  <input id="one-time-link" class="link-field" type="text" value="{{ link }}" readonly aria-label="One-time link">
-  <button type="button" data-copy-target="one-time-link">Copy</button>
-</p>
-<p><a href="{{ back_url }}">{{ back_label }}</a></p>
+<a class="back-link" href="{{ back_url }}">{{ back_label }}</a>
+<section class="card auth-card wide">
+  <h1>{{ heading }}</h1>
+  <p>Send this link to <strong>{{ email }}</strong>. It works once and expires in 48 hours.</p>
+  <p class="alert alert-warning">This is the only time the link is shown. If it is lost, create a new one.</p>
+  <p class="copy-row">
+    <input id="one-time-link" class="link-field" type="text" value="{{ link }}" readonly aria-label="One-time link">
+    <button type="button" class="btn btn-primary" data-copy-target="one-time-link">Copy</button>
+  </p>
+</section>
 {% endblock %}

@@ -97,6 +97,26 @@ Scripts (synthetic data only, output goes to the gitignored `output/`):
 - `scripts/bench.py --rows 10000 [--names same|pool|unique]`: time the full pipeline.
 - `scripts/make_big_csv.py`: write a synthetic CSV for load tests.
 - `scripts/sample_pdfs.py`: render the fixture PDFs so you can look at them.
+- `scripts/screens.py`: screenshot every page at desktop (1440 px) and phone (390 px)
+  width, light and dark, into `output/screens/`. One-time setup:
+  `.venv\Scripts\python.exe -m pip install -e .[dev]` then
+  `.venv\Scripts\python.exe -m playwright install chromium`. It starts the app on
+  127.0.0.1 against `TEST_DATABASE_URL` (which it empties and fills with synthetic
+  accounts, as the tests do; it refuses to run on the `DATABASE_URL` database) and
+  uses random keys, never the `.env` ones. Downloads are refused, so no ZIP or PDF
+  is saved. Options: `--only login,upload` (page-name prefixes), `--skip-generate`
+  (no PDF generation, much faster), `--no-dark`.
+
+## Web UI
+
+Templates are in `app/web/templates`, styles in `app/web/static/app.css` (design
+tokens as CSS variables at the top, with a dark scheme via `prefers-color-scheme`),
+behaviour in `app/web/static/app.js`. The Content-Security-Policy allows scripts,
+styles, images and fonts from the app itself only, so no inline `style=` or
+`<script>` and no external URLs (`tests/web/test_templates.py` checks this, and
+that the colour tokens meet WCAG AA). The font is Inter 4.1 (variable,
+`static/fonts/InterVariable.woff2`, SIL Open Font License in `static/fonts/OFL.txt`),
+with system fonts as fallback.
 
 ## PDF contents
 

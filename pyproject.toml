@@ -34,14 +34,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "ruff", "httpx"]
+dev = ["pytest", "ruff", "httpx", "playwright"]  # playwright: scripts/screens.py only
 
 [tool.setuptools.packages.find]
 include = ["app*"]
 
 [tool.setuptools.package-data]
 "app.core" = ["assets/fonts/*"]
-"app.web" = ["templates/*.html", "static/*", "static/brand/*"]
+"app.web" = ["templates/*.html", "static/*", "static/brand/*", "static/fonts/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

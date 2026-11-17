@@ -1,42 +1,57 @@
 {% extends "base.html" %}
 {% block title %}Team · eSIM PDF generator{% endblock %}
 {% block content %}
-<h1>Team</h1>
+<div class="page-header">
+  <div>
+    <h1>Team</h1>
+    <p class="lead">People in your organization who can generate PDFs.</p>
+  </div>
+</div>
 {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
-<table class="admin-table">
-  <thead>
-    <tr><th>Email</th><th>Role</th><th>Last login</th><th>Status</th><th>Actions</th></tr>
-  </thead>
-  <tbody>
-    {% for u in users %}
-    <tr>
-      <td>{{ u.email }}{% if u.id == me %} (you){% endif %}</td>
-      <td>{{ u.role.value }}</td>
-      <td>{% if u.has_password %}{{ u.last_login_at | utc }}{% else %}invited, no password yet{% endif %}</td>
-      <td>{% if u.disabled %}<strong>disabled</strong>{% else %}enabled{% endif %}</td>
-      <td class="actions">
-        {% if u.role.value == "member" and not u.is_superadmin and u.id != me %}
-        <form method="post" action="/team/users/{{ u.id }}/reset-link" class="inline">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <button type="submit"{% if u.disabled %} disabled{% endif %}>Reset link</button>
-        </form>
-        <form method="post" action="/team/users/{{ u.id }}/{% if u.disabled %}enable{% else %}disable{% endif %}" class="inline">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-          <button type="submit">{% if u.disabled %}Enable{% else %}Disable{% endif %}</button>
-        </form>
-        {% endif %}
-      </td>
-    </tr>
-    {% endfor %}
-  </tbody>
-</table>
 
-<h2>Invite a member</h2>
-<form method="post" action="/team/invite" class="auth-form">
-  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-  <label for="invite_email">Email</label>
-  <input id="invite_email" type="email" name="email" required maxlength="254">
-  <p><button type="submit">Create invite link</button></p>
-</form>
-<p>Members can generate PDFs. Only an administrator can add owners.</p>
+<section class="card" aria-labelledby="members-title">
+  <h2 id="members-title" class="visually-hidden">Members</h2>
+  <div class="table-wrap" tabindex="0" role="region" aria-label="Team members">
+  <table class="admin-table">
+    <thead>
+      <tr><th>Email</th><th>Role</th><th>Last login</th><th>Status</th><th class="num">Actions</th></tr>
+    </thead>
+    <tbody>
+      {% for u in users %}
+      <tr>
+        <td>{{ u.email }}{% if u.id == me %} (you){% endif %}</td>
+        <td><span class="badge{% if u.role.value == "owner" %} badge-info{% endif %}">{{ u.role.value }}</span></td>
+        <td class="muted">{% if u.has_password %}{{ u.last_login_at | utc }}{% else %}invited, no password yet{% endif %}</td>
+        <td>{% if u.disabled %}<span class="badge badge-error">disabled</span>{% else %}<span class="badge badge-success">enabled</span>{% endif %}</td>
+        <td class="actions">
+          {% if u.role.value == "member" and not u.is_superadmin and u.id != me %}
+          <form method="post" action="/team/users/{{ u.id }}/reset-link" class="inline">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button type="submit" class="btn btn-sm"{% if u.disabled %} disabled{% endif %}>Reset link</button>
+          </form>
+          <form method="post" action="/team/users/{{ u.id }}/{% if u.disabled %}enable{% else %}disable{% endif %}" class="inline">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button type="submit" class="btn btn-sm{% if not u.disabled %} btn-danger{% endif %}">{% if u.disabled %}Enable{% else %}Disable{% endif %}</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section class="card" aria-labelledby="invite-title">
+  <h2 id="invite-title">Invite a member</h2>
+  <form method="post" action="/team/invite" class="inline-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="field">
+      <label for="invite_email">Email</label>
+      <input id="invite_email" type="email" name="email" required maxlength="254">
+    </div>
+    <button type="submit" class="btn btn-primary">Create invite link</button>
+  </form>
+  <p class="hint">Members can generate PDFs. Only an administrator can add owners.</p>
+</section>
 {% endblock %}

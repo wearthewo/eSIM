@@ -1,32 +1,46 @@
 {% extends "base.html" %}
 {% block title %}Request access · eSIM PDF generator{% endblock %}
 {% block content %}
-<h1>Request access</h1>
-<p>Tell us about your company. We review every request and send an invitation link by email.</p>
-{% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
-<form method="post" action="/request-access" class="auth-form">
-  <input type="hidden" name="form_token" value="{{ form_token }}">
-  <label for="company_name">Company name</label>
-  <input id="company_name" type="text" name="company_name" required maxlength="{{ max_name_chars }}" autocomplete="organization" value="{{ values.company_name }}">
-  <label for="contact_name">Your name</label>
-  <input id="contact_name" type="text" name="contact_name" required maxlength="{{ max_name_chars }}" autocomplete="name" value="{{ values.contact_name }}">
-  <label for="email">Work email</label>
-  <input id="email" type="email" name="email" required maxlength="{{ max_email_chars }}" autocomplete="email" value="{{ values.email }}">
-  <label for="volume_band">eSIMs per month (expected)</label>
-  <select id="volume_band" name="volume_band" required>
-    <option value="">Choose…</option>
-    {% for band, label in bands.items() %}
-    <option value="{{ band.value }}"{% if values.volume_band == band.value %} selected{% endif %}>{{ label }}</option>
-    {% endfor %}
-  </select>
-  <label for="note">Note (optional)</label>
-  <textarea id="note" name="note" rows="5" maxlength="{{ max_note_chars }}">{{ values.note }}</textarea>
-  {# Honeypot: hidden with CSS. People never see or fill it. #}
-  <div class="hp-field" aria-hidden="true">
-    <label for="website">Website</label>
-    <input id="website" type="text" name="website" tabindex="-1" autocomplete="off" value="">
-  </div>
-  <p><button type="submit">Send request</button></p>
-</form>
-<p><a href="/login">Back to log in</a></p>
+<div class="card auth-card wide">
+  <h1>Request access</h1>
+  <p class="muted">Tell us about your company. We review every request and send an invitation link by email.</p>
+  {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+  <form method="post" action="/request-access" class="auth-form">
+    <input type="hidden" name="form_token" value="{{ form_token }}">
+    <div class="field">
+      <label for="company_name">Company name</label>
+      <input id="company_name" type="text" name="company_name" required maxlength="{{ max_name_chars }}" autocomplete="organization" value="{{ values.company_name }}">
+    </div>
+    <div class="field">
+      <label for="contact_name">Your name</label>
+      <input id="contact_name" type="text" name="contact_name" required maxlength="{{ max_name_chars }}" autocomplete="name" value="{{ values.contact_name }}">
+    </div>
+    <div class="field">
+      <label for="email">Work email</label>
+      <input id="email" type="email" name="email" required maxlength="{{ max_email_chars }}" autocomplete="email" value="{{ values.email }}">
+    </div>
+    <div class="field">
+      <label for="volume_band">eSIMs per month (expected)</label>
+      <select id="volume_band" name="volume_band" required>
+        <option value="">Choose…</option>
+        {% for band, label in bands.items() %}
+        <option value="{{ band.value }}"{% if values.volume_band == band.value %} selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="field">
+      <label for="note">Note <span class="optional">(optional)</span></label>
+      <textarea id="note" name="note" rows="5" maxlength="{{ max_note_chars }}">{{ values.note }}</textarea>
+    </div>
+    {# Honeypot: hidden with CSS. People never see or fill it. #}
+    <div class="hp-field" aria-hidden="true">
+      <label for="website">Website</label>
+      <input id="website" type="text" name="website" tabindex="-1" autocomplete="off" value="">
+    </div>
+    <div class="form-actions"><button type="submit" class="btn btn-primary btn-block">Send request</button></div>
+  </form>
+</div>
+<div class="auth-links">
+  <p><a href="/login">Back to log in</a></p>
+</div>
 {% endblock %}

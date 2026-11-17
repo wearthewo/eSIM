@@ -1,7 +1,9 @@
 {% extends "base.html" %}
 {% block title %}Request received · eSIM PDF generator{% endblock %}
 {% block content %}
-<h1>Thank you</h1>
-<p>We have received your request. If it is approved, you will get an invitation link by email.</p>
-<p><a href="/login">Back to log in</a></p>
+<div class="card auth-card">
+  <h1>Thank you</h1>
+  <p class="alert alert-success">We have received your request. If it is approved, you will get an invitation link by email.</p>
+  <a class="btn btn-block" href="/login">Back to log in</a>
+</div>
 {% endblock %}

@@ -52,6 +52,7 @@ CONTENT_SECURITY_POLICY = "; ".join(
         "script-src 'self'",
         "style-src 'self'",
         "img-src 'self'",
+        "font-src 'self'",
         "connect-src 'self'",
         "form-action 'self'",
         "base-uri 'none'",
