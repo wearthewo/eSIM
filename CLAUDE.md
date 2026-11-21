@@ -18,6 +18,13 @@ tests/ fixtures/ (synthetic data only)
 
 - ICCID, IMSI, MSISDN are ALWAYS strings. Never cast to int/float.
 - Never write activation codes to disk, logs, or a database. Process in memory.
+- The upload cache (app/upload_cache.py, app.state.upload_cache) holds checked rows,
+  including activation codes, between /validate and the /generate parts. They live only
+  in that structure, in process memory: never logged, repr'd, pickled, copied elsewhere or
+  written to disk. Entries are scoped to the organization, expire 30 min after last use
+  (UPLOAD_CACHE_TTL_MINUTES), are evicted LRU over UPLOAD_CACHE_MB (default 150), and are
+  dropped when the batch is completed, fails or is voided. A miss is never an error:
+  /generate answers 428 + X-Esim-Upload-Needed and app.js re-sends the part with the file.
 - The confirmation code is never embedded in the QR payload or the built
   LPA string. The QR encodes only the activation code (LPA string).
 - Never use real activation codes. Tests use synthetic fixtures only.
@@ -72,5 +79,8 @@ Tests pass, lint clean, only the requested module changed.
   writes a batch_voided audit row. void() and record_part share the per-organization lock.
 - A batch keeps the part size it was created with (batches.chunk_rows); code working on an
   existing batch must use it, never GENERATE_CHUNK_ROWS directly.
+- GENERATE_SLOTS (default 1) is the number of /generate jobs at once per process: on 0.5
+  CPU two jobs only halve each other's speed. MAX_ROWS (10,000) and MAX_UPLOAD_MB (5) are
+  the product limits; only local benchmarks (scripts/bench.py) raise them.
 - IDs in URLs. Sequential bigint IDs are fine, but the login step must check every request that takes an ID (batch, user, invite) against the user’s organization, so nobody can see another company’s data by changing /batches/41 to /batches/42
 - Never set the sqlalchemy loggers to DEBUG in production (they print row data, including emails).

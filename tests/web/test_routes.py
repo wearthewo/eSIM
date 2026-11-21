@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import dataclasses
 import hashlib
 import importlib.util
 import io
@@ -28,6 +29,7 @@ from app import batches
 from app.core import parser, pipeline, sheets, zipper
 from app.core.models import Branding, ParseError
 from app.db.models import User
+from app.settings import Settings
 from app.web import routes
 from app.web.auth import CSRF_HEADER, SESSION_COOKIE
 from app.web.main import SECURITY_HEADERS
@@ -1091,11 +1093,22 @@ def test_pipeline_runs_off_the_event_loop(
     asyncio.run(scenario())
 
 
+def _set_slots(user: LoggedIn, slots: int) -> None:
+    """GENERATE_SLOTS for this test's app (read when its first /generate waits)."""
+    user.app.state.settings = dataclasses.replace(user.app.state.settings, generate_slots=slots)
+
+
+def test_generate_slots_default_to_one(logged_in: LoggedIn) -> None:
+    assert Settings().generate_slots == 1
+    assert logged_in.app.state.settings.generate_slots == 1
+
+
+@pytest.mark.parametrize("slots", [1, 2])
 def test_generate_limited_to_concurrent_jobs(
-    logged_in: LoggedIn, monkeypatch, fixture_bytes
+    logged_in: LoggedIn, monkeypatch, fixture_bytes, slots: int
 ) -> None:
-    assert routes.MAX_CONCURRENT_JOBS == 2
     assert routes.JOB_WAIT_SECONDS == 5.0
+    _set_slots(logged_in, slots)
     monkeypatch.setattr(routes, "JOB_WAIT_SECONDS", 0.2)
     gate = _Gate(routes._generate_part)
     monkeypatch.setattr(routes, "_generate_part", gate)
@@ -1103,8 +1116,10 @@ def test_generate_limited_to_concurrent_jobs(
 
     async def scenario() -> None:
         async with _async_client(logged_in) as client:
-            jobs = [asyncio.create_task(_post_generate(client, data, logged_in)) for _ in range(2)]
-            assert await gate.entered(2)
+            jobs = [
+                asyncio.create_task(_post_generate(client, data, logged_in)) for _ in range(slots)
+            ]
+            assert await gate.entered(slots)
 
             busy = await asyncio.wait_for(_post_generate(client, data, logged_in), 5)
             assert busy.status_code == 503
@@ -1113,16 +1128,17 @@ def test_generate_limited_to_concurrent_jobs(
             assert busy.headers["retry-after"] == "60"
             assert busy.headers["cache-control"] == "no-store"
             _assert_security_headers(busy)
-            assert gate.peak == 2  # the third request never reached the pipeline
+            assert gate.peak == slots  # the extra request never reached the pipeline
 
             gate.release.set()
-            assert [(await job).status_code for job in jobs] == [200, 200]
+            assert [(await job).status_code for job in jobs] == [200] * slots
             assert (await _post_generate(client, data, logged_in)).status_code == 200
 
     asyncio.run(scenario())
 
 
 def test_generate_waits_for_a_free_slot(logged_in: LoggedIn, monkeypatch, fixture_bytes) -> None:
+    _set_slots(logged_in, 2)
     gate = _Gate(routes._generate_part)
     monkeypatch.setattr(routes, "_generate_part", gate)
     data = fixture_bytes("valid_minimal.csv")
@@ -1270,7 +1286,9 @@ def chunk_of_three(monkeypatch) -> None:
 def test_limits_shown_to_the_web_layer() -> None:
     assert parser.MAX_ROWS == 10_000
     assert pipeline.GENERATE_CHUNK_ROWS == 500
-    assert routes.MAX_CONCURRENT_JOBS == 2
+    assert Settings().generate_slots == 1
+    assert Settings().max_rows == parser.MAX_ROWS
+    assert Settings().max_upload_bytes == routes.MAX_UPLOAD_BYTES
 
 
 def test_ten_thousand_rows_with_all_columns_fit_under_the_upload_cap() -> None:

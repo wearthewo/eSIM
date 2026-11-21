@@ -15,9 +15,15 @@ organization, or one that no longer exists, gives 404. Each generated part recor
 rows' fingerprints and is counted once in ``parts_downloaded`` and in the usage table.
 Users without an organization (a superadmin) cannot generate.
 
-Large orders are generated in parts of ``GENERATE_CHUNK_ROWS`` rows. The page
-asks for one part at a time and sends the whole file with every request; the
-server keeps no file data between requests.
+Large orders are generated in parts of the batch's ``chunk_rows`` rows. The page asks
+for one part at a time. /validate keeps the checked rows of the batch in process memory
+(``app.upload_cache``, never on disk), so a part request needs only the batch id and the
+part number: no file, no parse, no whole-file check; the part's rows are checked for
+duplicates again inside ``batches.record_part``. When the rows are not cached (expired,
+evicted, server restarted, another worker) a request without the file gets 428 with the
+``X-Esim-Upload-Needed`` header, and the page sends the same part again with the file:
+that request is checked in full, as before the cache, and fills the cache again. The
+cached rows are dropped when the batch is completed, failed or voided.
 
 Never log request bodies, uploaded filenames, or cell values.
 """
@@ -47,34 +53,38 @@ from app import batches
 from app.auth.accounts import CurrentUser
 from app.batches import Continuation, UsedSummary
 from app.core import pipeline, sheets
-from app.core.models import Branding, ParseError, ValidationReport
-from app.core.parser import MAX_ROWS, SUPPORTED_EXTENSIONS
+from app.core.models import Branding, EsimRecord, ParseError, ValidationReport
+from app.core.parser import MAX_ROWS, SUPPORTED_EXTENSIONS, ParsedUpload
 from app.core.pipeline import PartError, check_upload
-from app.db.models import BatchStatus
+from app.db.models import Batch, BatchStatus
+from app.settings import DEFAULT_GENERATE_SLOTS
+from app.upload_cache import CachedUpload, UploadCache
 from app.web.auth import require_user, sessions_of, utc_now
 from app.web.templating import templates
 
+# Product limits. Settings (MAX_UPLOAD_MB, MAX_ROWS) default to these; only local
+# benchmarks raise them (``Limits``).
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024
 MAX_LOGO_BYTES = 500 * 1024
 MAX_FIELD_BYTES = 1024
 MAX_PART_HEADER_BYTES = 4 * 1024
 MAX_PARTS = 10
+_BODY_OVERHEAD_BYTES = 64 * 1024  # boundaries, part headers and text fields
 # Both files at their caps, plus room for boundaries, part headers and text fields.
-MAX_BODY_BYTES = MAX_UPLOAD_BYTES + MAX_LOGO_BYTES + 64 * 1024
+MAX_BODY_BYTES = MAX_UPLOAD_BYTES + MAX_LOGO_BYTES + _BODY_OVERHEAD_BYTES
 MAX_COMPANY_CHARS = 100
 MAX_FOOTER_CHARS = 200
 DEFAULT_PRIMARY_HEX = "#000000"
 
 DATA_FIELD = "file"
 LOGO_FIELD = "logo"
-PART_LIMITS: dict[str, int] = {DATA_FIELD: MAX_UPLOAD_BYTES, LOGO_FIELD: MAX_LOGO_BYTES}
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 JPEG_SIGNATURE = b"\xff\xd8\xff"
 MAX_LOGO_SIDE_PX = 2000  # width and height, read from the image header before decoding
 
-# PDF generation is CPU- and memory-heavy: at most this many /generate jobs run at
-# once (per process). Further requests wait up to JOB_WAIT_SECONDS, then get a 503.
-MAX_CONCURRENT_JOBS = 2
+# PDF generation is CPU- and memory-heavy: at most ``Settings.generate_slots`` /generate
+# jobs (GENERATE_SLOTS, default 1) run at once per process. Further requests wait up to
+# JOB_WAIT_SECONDS, then get a 503.
 JOB_WAIT_SECONDS = 5.0
 BUSY_RETRY_AFTER_SECONDS = 60
 
@@ -94,17 +104,27 @@ DEFAULT_LOGO_PATH: Path = Path(__file__).parent / "static" / "brand" / "logo.png
 MSG_MALFORMED = "The upload could not be read. Reload the page and try again."
 MSG_NO_FILE = "Choose a .csv or .xlsx file to upload."
 MSG_UNSUPPORTED = "Unsupported file type. Upload a .csv or .xlsx file."
-MSG_BODY_TOO_LARGE = (
-    f"The upload is too large. Data files can be up to {MAX_UPLOAD_BYTES // (1024 * 1024)} MB "
-    f"and logos up to {MAX_LOGO_BYTES // 1024} KB."
-)
-MSG_TOO_LARGE: dict[str, str] = {
-    DATA_FIELD: (
-        f"The data file is larger than {MAX_UPLOAD_BYTES // (1024 * 1024)} MB. "
-        "Split it into smaller files and upload them one at a time."
-    ),
-    LOGO_FIELD: f"The logo is larger than {MAX_LOGO_BYTES // 1024} KB. Use a smaller image.",
-}
+
+
+def _body_too_large_message(upload_bytes: int) -> str:
+    return (
+        f"The upload is too large. Data files can be up to {upload_bytes // (1024 * 1024)} MB "
+        f"and logos up to {MAX_LOGO_BYTES // 1024} KB."
+    )
+
+
+def _too_large_messages(upload_bytes: int) -> dict[str, str]:
+    return {
+        DATA_FIELD: (
+            f"The data file is larger than {upload_bytes // (1024 * 1024)} MB. "
+            "Split it into smaller files and upload them one at a time."
+        ),
+        LOGO_FIELD: f"The logo is larger than {MAX_LOGO_BYTES // 1024} KB. Use a smaller image.",
+    }
+
+
+MSG_BODY_TOO_LARGE = _body_too_large_message(MAX_UPLOAD_BYTES)
+MSG_TOO_LARGE: dict[str, str] = _too_large_messages(MAX_UPLOAD_BYTES)
 MSG_FIELD_TOO_LARGE = "A form field is too long."
 MSG_NO_ROWS = "The file has a header row but no data rows."
 MSG_BAD_LOGO = "The logo must be a PNG or JPEG image."
@@ -123,9 +143,56 @@ MSG_CONTROL_CHARS = "Company name and footer text must not contain control chara
 MSG_NO_ORGANIZATION = "Generating PDFs needs an account in an organization."
 MSG_NO_BATCH = "The download is missing its file check. Choose the file again."
 MSG_BATCH_GONE = "This upload is no longer available. Choose the file again."
+# Shown only without app.js, which sends the part again with the file on a 428.
+MSG_UPLOAD_NEEDED = "The server needs the file again for this part. Choose the file again."
+UPLOAD_NEEDED_HEADER = "X-Esim-Upload-Needed"
+UPLOAD_NEEDED_STATUS = 428  # Precondition Required: send the part again with the file
 
 # Every route here needs a logged-in user, and every POST the session's CSRF token.
 router = APIRouter(dependencies=[Depends(require_user)])
+
+
+@dataclass(frozen=True, slots=True)
+class Limits:
+    """Upload limits: the product values unless settings raise them (benchmarks)."""
+
+    max_upload_bytes: int = MAX_UPLOAD_BYTES
+    max_rows: int = MAX_ROWS
+
+    @property
+    def max_body_bytes(self) -> int:
+        return self.max_upload_bytes + MAX_LOGO_BYTES + _BODY_OVERHEAD_BYTES
+
+    @property
+    def part_limits(self) -> dict[str, int]:
+        return {DATA_FIELD: self.max_upload_bytes, LOGO_FIELD: MAX_LOGO_BYTES}
+
+    @property
+    def too_large(self) -> dict[str, str]:
+        if self.max_upload_bytes == MAX_UPLOAD_BYTES:
+            return MSG_TOO_LARGE
+        return _too_large_messages(self.max_upload_bytes)
+
+    @property
+    def body_too_large(self) -> str:
+        if self.max_upload_bytes == MAX_UPLOAD_BYTES:
+            return MSG_BODY_TOO_LARGE
+        return _body_too_large_message(self.max_upload_bytes)
+
+
+DEFAULT_LIMITS = Limits()
+
+
+def limits_of(request: Request) -> Limits:
+    """The app's limits, from its settings (``MAX_UPLOAD_MB``, ``MAX_ROWS``)."""
+    settings = getattr(request.app.state, "settings", None)
+    if settings is None:
+        return DEFAULT_LIMITS
+    return Limits(max_upload_bytes=settings.max_upload_bytes, max_rows=settings.max_rows)
+
+
+def upload_cache_of(request: Request) -> UploadCache:
+    return request.app.state.upload_cache
 
 
 class UploadRejected(Exception):
@@ -204,10 +271,12 @@ def get_branding() -> Branding:
 class _FormCollector:
     """``MultipartParser`` callbacks that keep each part in memory under its size cap."""
 
-    def __init__(self) -> None:
+    def __init__(self, limits: Limits = DEFAULT_LIMITS) -> None:
         self.fields: dict[str, str] = {}
         self.files: dict[str, UploadedFile] = {}
         self._parts = 0
+        self._part_limits = limits.part_limits
+        self._too_large = limits.too_large
         self._reset_part()
 
     def _reset_part(self) -> None:
@@ -267,13 +336,13 @@ class _FormCollector:
         if raw_filename is None:
             return  # a text field: MAX_FIELD_BYTES
         self._filename = raw_filename.decode("utf-8", errors="replace")
-        self._limit = PART_LIMITS.get(self._name, MAX_FIELD_BYTES)
+        self._limit = self._part_limits.get(self._name, MAX_FIELD_BYTES)
         if self._name == DATA_FIELD and self._filename:
             _check_extension(self._filename)  # before reading any of the file
 
     def on_part_data(self, data: bytes, start: int, end: int) -> None:
         if len(self._data) + (end - start) > self._limit:
-            raise UploadRejected(413, MSG_TOO_LARGE.get(self._name, MSG_FIELD_TOO_LARGE))
+            raise UploadRejected(413, self._too_large.get(self._name, MSG_FIELD_TOO_LARGE))
         self._data += data[start:end]
 
     def on_part_end(self) -> None:
@@ -292,36 +361,38 @@ def _check_extension(filename: str) -> None:
         raise UploadRejected(400, MSG_UNSUPPORTED)
 
 
-async def read_capped(request: Request) -> UploadForm:
+async def read_capped(request: Request, limits: Limits | None = None) -> UploadForm:
     """Stream the multipart body into memory, enforcing the size caps as bytes arrive.
 
     Raises ``UploadRejected`` with 413 as soon as the data file passes
-    ``MAX_UPLOAD_BYTES``, the logo passes ``MAX_LOGO_BYTES``, a text field passes
-    ``MAX_FIELD_BYTES`` or the body passes ``MAX_BODY_BYTES``. The rest of the
-    body is not read. A declared Content-Length above ``MAX_BODY_BYTES`` is
-    refused before anything is read, and so is a data file with an unsupported
-    extension (400). Nothing is written to disk.
+    ``max_upload_bytes`` (``MAX_UPLOAD_BYTES`` unless settings raise it), the logo
+    passes ``MAX_LOGO_BYTES``, a text field passes ``MAX_FIELD_BYTES`` or the body
+    passes ``max_body_bytes``. The rest of the body is not read. A declared
+    Content-Length above ``max_body_bytes`` is refused before anything is read, and so
+    is a data file with an unsupported extension (400). Nothing is written to disk.
     """
+    limits = limits if limits is not None else limits_of(request)
+    max_body = limits.max_body_bytes
     declared = request.headers.get("content-length")
     if declared is not None:
         if not declared.isdigit():
             raise UploadRejected(400, MSG_MALFORMED)
-        if int(declared) > MAX_BODY_BYTES:
-            raise UploadRejected(413, MSG_BODY_TOO_LARGE)
+        if int(declared) > max_body:
+            raise UploadRejected(413, limits.body_too_large)
 
     content_type, params = parse_options_header(request.headers.get("content-type"))
     boundary = params.get(b"boundary")
     if content_type != b"multipart/form-data" or not boundary:
         raise UploadRejected(400, MSG_MALFORMED)
 
-    collector = _FormCollector()
+    collector = _FormCollector(limits)
     received = 0
     try:
         parser = MultipartParser(boundary, collector.callbacks())  # type: ignore[arg-type]
         async for chunk in request.stream():
             received += len(chunk)
-            if received > MAX_BODY_BYTES:
-                raise UploadRejected(413, MSG_BODY_TOO_LARGE)
+            if received > max_body:
+                raise UploadRejected(413, limits.body_too_large)
             parser.write(chunk)
         parser.finalize()
     except (FormParserError, ValueError):
@@ -334,6 +405,15 @@ def _data_file(form: UploadForm) -> UploadedFile:
     if upload is None or not upload.filename:
         raise UploadRejected(400, MSG_NO_FILE)
     return upload
+
+
+def _optional_data_file(form: UploadForm) -> UploadedFile | None:
+    """/generate: no ``file`` field at all means "use the cached rows" (app.js leaves it
+    out). A ``file`` field without a file chosen (empty or no filename, so possibly
+    parsed as a text field) is refused as on /validate."""
+    if DATA_FIELD not in form.files and DATA_FIELD not in form.fields:
+        return None
+    return _data_file(form)
 
 
 def _has_control_chars(text: str) -> bool:
@@ -479,45 +559,84 @@ def _check(
     organization_id: int,
     upload: UploadedFile,
     now: datetime,
+    *,
+    cache: UploadCache | None = None,
+    max_rows: int | None = None,
 ) -> Results:
     """Parse, validate, check against earlier batches; a file that passes gets a batch.
 
     A file whose only duplicates are an unfinished batch's own rows, in the same parts,
     continues that batch (``batches.continuable``): no new batch, the old id is reused.
+    Either way the checked rows go into ``cache`` under the batch id, for /generate.
     Raises ``ParseError``.
     """
-    parsed, report = check_upload(upload.data, upload.filename)
+    parsed, report = check_upload(upload.data, upload.filename, max_rows=max_rows)
     if not parsed.records:
         raise ParseError(MSG_NO_ROWS)
     row_count = len(parsed.records)
+    chunk_rows = pipeline.GENERATE_CHUNK_ROWS  # a new batch keeps today's part size
     with sessions.begin() as db:
         used = batches.find_used(db, organization_id, report.valid, key=key, now=now)
         continuation = batches.continuable(db, organization_id, report, used, row_count=row_count)
         if continuation is not None:
-            return Results(
+            results = Results(
                 row_count=row_count,
                 report=report,
                 batch_id=continuation.batch_id,
                 continuation=continuation,
             )
-        report = batches.merge(report, used)
-        batch_id = None
-        if report.ok:
-            batch_id = batches.create_batch(
-                db,
-                organization_id=organization_id,
-                user_id=user.user_id,
-                file_name=upload.filename,
-                row_count=row_count,
-                parts=pipeline.part_count(row_count),
-                warning_count=len(report.warnings),
-                now=now,
+            chunk_rows = continuation.chunk_rows
+        else:
+            report = batches.merge(report, used)
+            batch_id = None
+            if report.ok:
+                batch_id = batches.create_batch(
+                    db,
+                    organization_id=organization_id,
+                    user_id=user.user_id,
+                    file_name=upload.filename,
+                    row_count=row_count,
+                    parts=pipeline.part_count(row_count, chunk_rows),
+                    warning_count=len(report.warnings),
+                    now=now,
+                    chunk_rows=chunk_rows,
+                )
+            results = Results(
+                row_count=row_count, report=report, used=used.summary, batch_id=batch_id
             )
-    return Results(row_count=row_count, report=report, used=used.summary, batch_id=batch_id)
+    if cache is not None and results.batch_id is not None:  # committed: cache the rows
+        _remember(cache, organization_id, results.batch_id, chunk_rows, parsed, report)
+    return results
+
+
+def _remember(
+    cache: UploadCache,
+    organization_id: int,
+    batch_id: int,
+    chunk_rows: int,
+    parsed: ParsedUpload,
+    report: ValidationReport,
+) -> None:
+    """Cache a batch's checked rows. Only a file whose every row is valid has a batch."""
+    if len(report.valid) != len(parsed.records):
+        return
+    cache.put(
+        CachedUpload.build(
+            organization_id=organization_id,
+            batch_id=batch_id,
+            chunk_rows=chunk_rows,
+            has_email=parsed.has_email,
+            records=report.valid,
+        )
+    )
 
 
 class BatchGone(Exception):
     """The batch does not exist or belongs to another organization."""
+
+
+class UploadNeeded(Exception):
+    """/generate without the file, and the batch's rows are not cached (any more)."""
 
 
 MSG_BATCH_VOIDED = "This batch was voided. Choose the file again."
@@ -531,26 +650,49 @@ class PartOutcome:
     archive: bytes | None
 
 
+@dataclass(frozen=True, slots=True, repr=False)
+class _PartRows:
+    """What rendering one part needs: its rows, and a report for error pages."""
+
+    row_count: int  # the whole file's
+    records: list[EsimRecord]  # this part's rows
+    has_email: bool
+    report: ValidationReport
+
+    def __repr__(self) -> str:
+        return f"_PartRows(row_count={self.row_count}, part_rows={len(self.records)})"
+
+
 def _generate_part(
     sessions: sessionmaker[Session],
     key: bytes,
     organization_id: int,
     batch_id: int,
-    upload: UploadedFile,
+    upload: UploadedFile | None,
     branding: Branding,
     part: int,
     parts: int,
     now: datetime,
+    *,
+    cache: UploadCache | None = None,
+    max_rows: int | None = None,
 ) -> PartOutcome:
-    """Validate the whole upload again (including earlier batches), render one part and
-    record it on the batch. Errors mark the batch ``failed``.
+    """Render one part of the batch and record it. Errors mark the batch ``failed``.
+
+    Without ``upload``, the part's rows come from ``cache`` (no parse, no whole-file
+    check); ``UploadNeeded`` is raised when they are not cached. With ``upload``, the
+    whole file is validated again (including earlier batches) and its rows are cached.
+    Either way ``batches.record_part`` checks the part's rows against other batches
+    again, under the organization's lock. The cached rows are dropped when the batch is
+    completed or fails.
 
     Every part uses the batch's own part size (``Batch.chunk_rows``), so a batch made
     before ``GENERATE_CHUNK_ROWS`` changed keeps its parts.
 
-    Raises ``BatchGone``, ``batches.BatchVoided``, ``PartError`` (also when the file does
-    not match the batch's row count) and ``ParseError``. No database connection is held
-    while PDFs render.
+    Raises ``BatchGone`` (checked first, so another organization's batch id never
+    reaches the cache), ``batches.BatchVoided``, ``UploadNeeded``, ``PartError`` (also
+    when the file or cached rows do not match the batch) and ``ParseError``. No database
+    connection is held while PDFs render.
     """
     with sessions.begin() as db:
         batch = batches.scoped_batch(db, organization_id, batch_id)
@@ -562,7 +704,87 @@ def _generate_part(
         chunk_rows = batch.chunk_rows
     if not 1 <= part <= parts:
         raise PartError(f"Part {part} of {parts} does not exist.")
-    parsed, report = check_upload(upload.data, upload.filename)
+
+    if upload is None:
+        cached = cache.get(organization_id, batch_id) if cache is not None else None
+        if cached is None:
+            raise UploadNeeded
+        rows = _cached_part(cached, part, parts, chunk_rows, expected)
+    else:
+        checked = _checked_part(
+            sessions,
+            key,
+            organization_id,
+            batch_id,
+            upload,
+            part,
+            parts,
+            now,
+            chunk_rows=chunk_rows,
+            expected=expected,
+            cache=cache,
+            max_rows=max_rows,
+        )
+        if isinstance(checked, PartOutcome):
+            return checked
+        rows = checked
+
+    archive = pipeline.build_zip_for(rows.records, branding, has_email=rows.has_email)
+    completed = False
+    with sessions.begin() as db:
+        race = batches.record_part(  # raises BatchVoided if voided meanwhile
+            db, organization_id, batch_id, part, rows.records, key=key, now=now
+        )
+        if race.found:  # another batch generated the same codes meanwhile
+            report = batches.merge(rows.report, race)
+            batches.mark_failed(db, organization_id, batch_id, report)
+        else:
+            recorded = db.get(Batch, batch_id)  # loaded by record_part: no query
+            completed = recorded is not None and recorded.status == BatchStatus.COMPLETED
+    if cache is not None and (race.found or completed):
+        cache.discard(batch_id)
+    if race.found:
+        return PartOutcome(Results(rows.row_count, report, race.summary), None)
+    return PartOutcome(Results(rows.row_count, rows.report), archive)
+
+
+def _cached_part(
+    cached: CachedUpload, part: int, parts: int, chunk_rows: int, expected: tuple[int, int]
+) -> _PartRows:
+    """The part's rows from the cache; ``PartError`` unless they match the batch."""
+    if (
+        (cached.row_count, parts) != expected
+        or cached.chunk_rows != chunk_rows
+        or pipeline.part_count(cached.row_count, chunk_rows) != parts
+    ):
+        raise PartError("The cached rows do not match their batch.")
+    records = pipeline.part_slice(cached.records, part, chunk_rows)
+    # The file passed when it was cached; there is no whole-file report. If another
+    # batch took one of these codes meanwhile, the error page lists this part's rows.
+    return _PartRows(cached.row_count, records, cached.has_email, ValidationReport(records))
+
+
+def _checked_part(
+    sessions: sessionmaker[Session],
+    key: bytes,
+    organization_id: int,
+    batch_id: int,
+    upload: UploadedFile,
+    part: int,
+    parts: int,
+    now: datetime,
+    *,
+    chunk_rows: int,
+    expected: tuple[int, int],
+    cache: UploadCache | None,
+    max_rows: int | None,
+) -> _PartRows | PartOutcome:
+    """Validate the whole re-sent file (including earlier batches) and cache its rows.
+
+    Returns the part's rows, or the outcome to show instead (errors mark the batch
+    failed and drop its cached rows).
+    """
+    parsed, report = check_upload(upload.data, upload.filename, max_rows=max_rows)
     pipeline.check_part(parsed, part, parts, chunk_rows)
     row_count = len(parsed.records)
     if (row_count, parts) != expected:
@@ -578,26 +800,15 @@ def _generate_part(
     if not report.ok:
         with sessions.begin() as db:
             batches.mark_failed(db, organization_id, batch_id, report)
+        if cache is not None:
+            cache.discard(batch_id)
         return PartOutcome(Results(row_count, report, used.summary), None)
     if not report.valid:
         return PartOutcome(Results(row_count, report), None)
-
-    archive = pipeline.build_part(parsed, report, branding, part=part, chunk_rows=chunk_rows)
-    with sessions.begin() as db:
-        race = batches.record_part(  # raises BatchVoided if voided meanwhile
-            db,
-            organization_id,
-            batch_id,
-            part,
-            pipeline.part_records(report, part, chunk_rows),
-            key=key,
-            now=now,
-        )
-        if race.found:  # another batch generated the same codes meanwhile
-            report = batches.merge(report, race)
-            batches.mark_failed(db, organization_id, batch_id, report)
-            return PartOutcome(Results(row_count, report, race.summary), None)
-    return PartOutcome(Results(row_count, report), archive)
+    if cache is not None:
+        _remember(cache, organization_id, batch_id, chunk_rows, parsed, report)
+    records = pipeline.part_records(report, part, chunk_rows)
+    return _PartRows(row_count, records, parsed.has_email, report)
 
 
 # --- Responses -----------------------------------------------------------------
@@ -613,13 +824,13 @@ def _form_values(defaults: Branding, form: UploadForm | None = None) -> dict[str
     }
 
 
-def _context(**extra: Any) -> dict[str, Any]:
+def _context(limits: Limits = DEFAULT_LIMITS, **extra: Any) -> dict[str, Any]:
     return {
-        "max_upload_bytes": MAX_UPLOAD_BYTES,
-        "max_upload_mb": MAX_UPLOAD_BYTES // (1024 * 1024),
+        "max_upload_bytes": limits.max_upload_bytes,
+        "max_upload_mb": limits.max_upload_bytes // (1024 * 1024),
         "max_logo_bytes": MAX_LOGO_BYTES,
         "max_logo_kb": MAX_LOGO_BYTES // 1024,
-        "max_rows": MAX_ROWS,
+        "max_rows": limits.max_rows,
         "chunk_rows": pipeline.GENERATE_CHUNK_ROWS,
         "max_issues_shown": MAX_ISSUES_SHOWN,
         "max_company_chars": MAX_COMPANY_CHARS,
@@ -637,22 +848,33 @@ def _rejection_headers(status_code: int) -> dict[str, str]:
         headers["Connection"] = "close"
     elif status_code == 503:
         headers["Retry-After"] = str(BUSY_RETRY_AFTER_SECONDS)
+    elif status_code == UPLOAD_NEEDED_STATUS:
+        headers[UPLOAD_NEEDED_HEADER] = "1"
     return headers
 
 
-# One semaphore per event loop: an asyncio.Semaphore is bound to the loop it first
-# waits on. Uvicorn runs one loop per worker process, so in production this is one
-# process-wide limit; tests that start their own loops get fresh semaphores.
-_job_slots: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore] = (
-    weakref.WeakKeyDictionary()
-)
+def generate_slot_count(request: Request) -> int:
+    """``Settings.generate_slots`` (GENERATE_SLOTS): /generate jobs at once per process."""
+    settings = getattr(request.app.state, "settings", None)
+    return settings.generate_slots if settings is not None else DEFAULT_GENERATE_SLOTS
 
 
-def _generate_slots() -> asyncio.Semaphore:
+def _generate_slots(request: Request) -> asyncio.Semaphore:
+    """The app's job slots on the running loop.
+
+    One semaphore per app and event loop: an asyncio.Semaphore is bound to the loop it
+    first waits on. Uvicorn runs one loop per worker process, so in production this is
+    one process-wide limit; tests that start their own loops get fresh semaphores.
+    """
+    state = request.app.state
+    per_loop: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore] | None
+    per_loop = getattr(state, "generate_slots", None)
+    if per_loop is None:
+        per_loop = state.generate_slots = weakref.WeakKeyDictionary()
     loop = asyncio.get_running_loop()
-    slots = _job_slots.get(loop)
+    slots = per_loop.get(loop)
     if slots is None:
-        slots = _job_slots[loop] = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
+        slots = per_loop[loop] = asyncio.Semaphore(generate_slot_count(request))
     return slots
 
 
@@ -662,7 +884,7 @@ def _page(
     return templates.TemplateResponse(
         request,
         "index.html",
-        _context(form=form_values, **extra),
+        _context(limits_of(request), form=form_values, **extra),
         status_code=status_code,
         headers=_rejection_headers(status_code),
     )
@@ -672,7 +894,7 @@ def _partial(request: Request, status_code: int = 200, **extra: Any) -> HTMLResp
     return templates.TemplateResponse(
         request,
         "_results.html",
-        _context(**extra),
+        _context(limits_of(request), **extra),
         status_code=status_code,
         headers=_rejection_headers(status_code),
     )
@@ -717,7 +939,7 @@ async def template_xlsx() -> Response:
 async def validate_upload(request: Request, user: User) -> HTMLResponse:
     """POST /validate (HTMX): parse, validate, check against earlier batches; return the
     ``_results.html`` partial. A file that passes gets a batch, whose id the partial puts
-    into the form for /generate."""
+    into the form for /generate, and its checked rows are kept in the upload cache."""
     if user.organization_id is None:
         return _partial(request, 403, error=MSG_NO_ORGANIZATION)
     try:
@@ -733,6 +955,8 @@ async def validate_upload(request: Request, user: User) -> HTMLResponse:
             user.organization_id,
             upload,
             utc_now(),
+            cache=upload_cache_of(request),
+            max_rows=limits_of(request).max_rows,
         )
     except ParseError as exc:
         return _partial(request, error=str(exc))
@@ -743,29 +967,33 @@ async def validate_upload(request: Request, user: User) -> HTMLResponse:
 async def generate(
     request: Request, defaults: Annotated[Branding, Depends(get_branding)], user: User
 ) -> Response:
-    """POST /generate: validate the whole upload, then build the ZIP for one part of it.
+    """POST /generate: build the ZIP for one part of a batch.
 
     The form field ``batch_id`` (from /validate) is required. The fields ``part``
     (1-based) and ``parts`` say which part; both default to 1, which is right for
-    uploads of up to ``GENERATE_CHUNK_ROWS`` rows. The page's script requests the
-    parts one after another.
+    uploads of up to one part. The page's script requests the parts one after another.
 
-    Returns the ZIP when every row of the upload is valid and none was generated by
-    another batch. Otherwise: the full page with the results table (422; the batch is
-    marked failed), the reason the request was rejected (400/413, including a missing
-    batch id and a part or file that does not match the batch), 404 for a batch that is
-    not the organization's or no longer exists, or a busy message (503) when no job slot
-    frees up within ``JOB_WAIT_SECONDS``.
+    The ``file`` part is optional. Without it the part is built from the rows /validate
+    cached; when they are not cached the answer is 428 with ``X-Esim-Upload-Needed: 1``
+    and the page sends the part again with the file. With it the whole file is
+    validated again (as before the cache) and cached.
+
+    Returns the ZIP when every row is valid and none was generated by another batch.
+    Otherwise: the full page with the results table (422; the batch is marked failed),
+    the reason the request was rejected (400/413, including a missing batch id and a
+    part or file that does not match the batch), 404 for a batch that is not the
+    organization's or no longer exists, 428 (see above), or a busy message (503) when
+    no job slot frees up within ``JOB_WAIT_SECONDS``.
 
     The pipeline runs in a worker thread. The slot is held until that thread
     finishes, even if the client disconnects: the thread call is not abandoned
-    on cancellation, so at most ``MAX_CONCURRENT_JOBS`` pipelines ever run.
+    on cancellation, so at most ``GENERATE_SLOTS`` pipelines ever run.
     """
     form_values = _form_values(defaults)
     try:
         form = await read_capped(request)
         form_values = _form_values(defaults, form)
-        upload = _data_file(form)
+        upload = _optional_data_file(form)
         batch_id = _batch_id(form)
         part, parts = _part_number(form, "part"), _part_number(form, "parts")
         branding = _branding(form, defaults)
@@ -775,7 +1003,7 @@ async def generate(
     if organization_id is None:
         return _page(request, form_values, 404, error=MSG_BATCH_GONE)
 
-    slots = _generate_slots()
+    slots = _generate_slots(request)
     try:
         await asyncio.wait_for(slots.acquire(), JOB_WAIT_SECONDS)
     except TimeoutError:
@@ -792,11 +1020,15 @@ async def generate(
             part,
             parts,
             utc_now(),
+            cache=upload_cache_of(request),
+            max_rows=limits_of(request).max_rows,
         )
     except BatchGone:
         return _page(request, form_values, 404, error=MSG_BATCH_GONE)
     except batches.BatchVoided:  # the user's own organization's batch: no 404 needed
         return _page(request, form_values, 409, error=MSG_BATCH_VOIDED)
+    except UploadNeeded:
+        return _page(request, form_values, UPLOAD_NEEDED_STATUS, error=MSG_UPLOAD_NEEDED)
     except ParseError as exc:
         return _page(request, form_values, 422, error=str(exc))
     except PartError:

@@ -10,7 +10,8 @@ the test network 001-01, and emails use ``example.invalid``. Never put real
 activation codes in a file.
 
 Names are Greek. By default they come from a pool of first names and surnames,
-like a real order. ``scripts/bench.py`` reuses ``make_csv`` with other name modes.
+like a real order. ``scripts/bench.py`` reuses ``make_csv`` with other name modes
+(including ASCII names).
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_ROWS = 10_000
-MAX_SCRIPT_ROWS = 10_000
+MAX_SCRIPT_ROWS = 100_000  # above the app's MAX_ROWS (10,000): for scripts/bench.py only
 
 COLUMNS = (
     "iccid",
@@ -35,6 +36,9 @@ COLUMNS = (
 )
 SAME_NAME = "Γιώργος Παπαδόπουλος"
 PLANS = ("Ταξίδι 10GB", "Ευρώπη 5GB", "Ελλάδα 20GB", "Κόσμος 3GB")
+ASCII_PLANS = ("Travel 10GB", "Europe 5GB", "Greece 20GB", "World 3GB")
+ASCII_FIRST_NAMES = ("George", "Maria", "Dimitris", "Eleni", "Kostas", "Katerina", "Nikos")
+ASCII_SURNAMES = ("Papadopoulos", "Nikolaou", "Dimitriou", "Georgiou", "Oikonomou", "Makris")
 FIRST_NAMES = (
     "Γιώργος", "Μαρία", "Δημήτρης", "Ελένη", "Κώστας", "Κατερίνα", "Νίκος", "Βασιλική",
     "Γιάννης", "Σοφία", "Παναγιώτης", "Αγγελική", "Χρήστος", "Δήμητρα", "Θανάσης", "Ευαγγελία",
@@ -91,19 +95,27 @@ def unique_charset_name(key: int) -> str:
 def make_csv(rows: int, names: str = "pool", first_key: int = 1) -> bytes:
     """Return CSV bytes with ``rows`` valid synthetic rows and every supported column.
 
-    ``names`` is ``"pool"`` (realistic mix), ``"same"`` (one name for every row) or
+    ``names`` is ``"pool"`` (realistic mix), ``"same"`` (one name for every row),
     ``"unique"`` (a different set of Greek characters per row, numbered from
-    ``first_key``). Everything except the name is the same in all three modes.
+    ``first_key``) or ``"ascii"`` (ASCII names and plans from a pool). Everything except
+    the name and plan is the same in all modes.
     """
     lines = [",".join(COLUMNS)]
     for n in range(1, rows + 1):
+        plan = PLANS[0]
         if names == "same":
             name = SAME_NAME
         elif names == "unique":
             name = unique_charset_name(first_key + n - 1)
+        elif names == "ascii":
+            name = (
+                f"{ASCII_FIRST_NAMES[n % len(ASCII_FIRST_NAMES)]} "
+                f"{ASCII_SURNAMES[(n // len(ASCII_FIRST_NAMES)) % len(ASCII_SURNAMES)]}"
+            )
+            plan = ASCII_PLANS[n % len(ASCII_PLANS)]
         else:
             name = pool_name(n)
-        plan = PLANS[0] if names != "pool" else PLANS[n % len(PLANS)]
+            plan = PLANS[n % len(PLANS)]
         lines.append(
             f"{synthetic_iccid(n)},LPA:1$smdp.example.invalid$TEST-{n:05d}-AAAA-BBBB,"
             f"CONF{n:05d},00101{n:010d},+3069{n:08d},{name},{plan},"
@@ -114,7 +126,7 @@ def make_csv(rows: int, names: str = "pool", first_key: int = 1) -> bytes:
 
 def main() -> int:
     args = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    args.add_argument("--rows", type=int, default=DEFAULT_ROWS, help="data rows (1-10000)")
+    args.add_argument("--rows", type=int, default=DEFAULT_ROWS, help="data rows (1-100000)")
     args.add_argument("--out", type=Path, default=None, help="default: output/big_<rows>.csv")
     opts = args.parse_args()
     if not 1 <= opts.rows <= MAX_SCRIPT_ROWS:

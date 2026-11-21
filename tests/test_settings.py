@@ -6,6 +6,7 @@ All secrets and passwords here are synthetic.
 from __future__ import annotations
 
 import pickle
+import re
 
 import pytest
 
@@ -246,3 +247,71 @@ def test_safe_database_url_hides_the_password() -> None:
 def test_secret_cannot_be_pickled() -> None:
     with pytest.raises(TypeError):
         pickle.dumps(Secret(PASSWORD))
+
+
+# --- performance settings and limits -----------------------------------------------
+
+
+def test_performance_defaults() -> None:
+    settings = load_settings({})
+    assert settings.generate_slots == 1
+    assert settings.upload_cache_mb == 150
+    assert settings.upload_cache_ttl_minutes == 30
+    assert settings.max_rows == 10_000
+    assert settings.max_upload_mb == 5 and settings.max_upload_bytes == 5 * 1024 * 1024
+
+
+def test_limits_default_to_the_product_constants() -> None:
+    from app.core.parser import MAX_ROWS
+    from app.web.routes import MAX_UPLOAD_BYTES
+
+    assert Settings().max_rows == MAX_ROWS
+    assert Settings().max_upload_bytes == MAX_UPLOAD_BYTES
+
+
+@pytest.mark.parametrize("env", [_prod(), {}], ids=["production", "development"])
+def test_performance_settings_are_read(env: dict[str, str]) -> None:
+    settings = load_settings(
+        {
+            **env,
+            "GENERATE_SLOTS": "2",
+            "UPLOAD_CACHE_MB": "0",
+            "UPLOAD_CACHE_TTL_MINUTES": " 45 ",
+            "MAX_ROWS": "100000",
+            "MAX_UPLOAD_MB": "64",
+        }
+    )
+    assert settings.generate_slots == 2
+    assert settings.upload_cache_mb == 0  # the cache is off
+    assert settings.upload_cache_ttl_minutes == 45
+    assert settings.max_rows == 100_000
+    assert settings.max_upload_bytes == 64 * 1024 * 1024
+
+
+def test_blank_performance_settings_use_the_defaults() -> None:
+    assert load_settings({"GENERATE_SLOTS": "", "MAX_ROWS": "  "}) == Settings()
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("GENERATE_SLOTS", "0"),
+        ("GENERATE_SLOTS", "17"),
+        ("GENERATE_SLOTS", "-1"),
+        ("GENERATE_SLOTS", "1.5"),
+        ("GENERATE_SLOTS", "two"),
+        ("GENERATE_SLOTS", "\u0662"),  # ARABIC-INDIC DIGIT TWO: not ASCII
+        ("UPLOAD_CACHE_MB", "-1"),
+        ("UPLOAD_CACHE_MB", "5000"),
+        ("UPLOAD_CACHE_TTL_MINUTES", "0"),
+        ("MAX_ROWS", "0"),
+        ("MAX_ROWS", "1000001"),
+        ("MAX_UPLOAD_MB", "0"),
+        ("MAX_UPLOAD_MB", "2048"),
+    ],
+)
+def test_bad_performance_settings_are_rejected(name: str, value: str) -> None:
+    with pytest.raises(SettingsError) as raised:
+        load_settings({name: value})
+    # The message names the variable and its range, never the value given.
+    assert re.fullmatch(rf"{name} must be a whole number from \d+ to \d+", str(raised.value))

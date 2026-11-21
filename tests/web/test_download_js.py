@@ -167,6 +167,10 @@ def render_results(rows: int, downloaded: tuple[int, ...] | None = None) -> str:
     return templates.env.get_template("_results.html").render(routes._context(results=results))
 
 
+# The data file's part of a /generate body, and its content (a one-line synthetic file).
+_FILE_PART = re.compile(rb'name="file"; filename="[^"]*"\r\n[^\r]*\r\n\r\n([^\r]*)')
+
+
 def error_page(message: str) -> str:
     return f'<!DOCTYPE html><div id="results"><p class="error">{message}</p></div>'
 
@@ -181,6 +185,10 @@ class FakeServer:
     fail_once: dict[int, tuple[int, str]] = field(default_factory=dict)
     held: list[tuple[Route, int, int]] = field(default_factory=list)
     downloaded: tuple[int, ...] | None = None  # set: the upload continues a batch
+    # Parts whose rows the server "no longer has": a request without the file gets 428.
+    need_file: set[int] = field(default_factory=set)
+    requests: list[tuple[int, bool]] = field(default_factory=list)  # (part, file sent)
+    file_bodies: list[bytes] = field(default_factory=list)  # data file of each file request
 
     def handle(self, route: Route) -> None:
         request = route.request
@@ -196,7 +204,19 @@ class FakeServer:
             body = request.post_data_buffer or b""
             part = int(re.search(rb'name="part"\r\n\r\n(\d+)', body).group(1))
             parts = int(re.search(rb'name="parts"\r\n\r\n(\d+)', body).group(1))
-            if part in self.fail_once:
+            file_part = _FILE_PART.search(body)
+            self.requests.append((part, file_part is not None))
+            if file_part is not None:
+                self.file_bodies.append(file_part.group(1))
+            if file_part is None and part in self.need_file:
+                self.need_file.discard(part)
+                route.fulfill(
+                    status=routes.UPLOAD_NEEDED_STATUS,
+                    body=error_page(routes.MSG_UPLOAD_NEEDED),
+                    content_type="text/html",
+                    headers={routes.UPLOAD_NEEDED_HEADER: "1"},
+                )
+            elif part in self.fail_once:
                 status, message = self.fail_once.pop(part)
                 route.fulfill(status=status, body=error_page(message), content_type="text/html")
             elif part in self.hold:
@@ -793,3 +813,51 @@ def test_continuing_opens_the_parts_list_with_parts_marked(continue_page: Harnes
     expect(h.part_button(1)).to_be_enabled()
     expect(h.status()).to_contain_text("Done: all 4 parts were downloaded.")
     assert h.fetches() == ["fetch 2", "fetch 4", "fetch 1"]
+
+
+# --- The server keeps the checked rows: parts without the file, and the fallback ---------------
+
+
+def test_parts_are_requested_without_the_file(folder_page: Harness) -> None:
+    h = folder_page
+    h.upload_and_download()
+    h.page.click("#choose-folder")
+    expect(h.status()).to_have_text(f"Done: all 3 ZIP files were saved to {FOLDER}.")
+    assert h.server.requests == [(1, False), (2, False), (3, False)]
+    assert h.log() == ["picker", *saved_in_order(3)]
+
+
+def test_a_miss_resends_the_file_for_that_part_only(folder_page: Harness) -> None:
+    h = folder_page
+    h.server.need_file = {2}  # e.g. the server restarted after part 1
+    h.upload_and_download()
+    h.page.click("#choose-folder")
+    expect(h.status()).to_have_text(f"Done: all 3 ZIP files were saved to {FOLDER}.")
+    assert h.server.requests == [(1, False), (2, False), (2, True), (3, False)]
+    assert h.server.file_bodies == [b"synthetic"]  # the file chosen at the start
+    assert h.fetches() == ["fetch 1", "fetch 2", "fetch 2", "fetch 3"]
+    assert h.files() == {zip_name(n, 3): zip_body(n).decode() for n in (1, 2, 3)}
+    expect(h.page.locator("#retry")).to_be_hidden()
+
+
+def test_a_miss_in_the_parts_list_resends_the_file(plain_page: Harness) -> None:
+    h = plain_page
+    h.server.need_file = {1, 3}
+    h.upload_and_download()
+    for n in (1, 2, 3):
+        expect(h.part_button(n)).to_be_enabled()
+        h.download_part(n)
+        expect(h.part_status(n)).to_have_text("Downloaded")
+    expect(h.status()).to_have_text("Done: all 3 parts were downloaded.")
+    assert h.server.requests == [(1, False), (1, True), (2, False), (3, False), (3, True)]
+    assert h.clicks() == [f"click {zip_name(n, 3)}" for n in (1, 2, 3)]
+
+
+def test_a_428_without_the_header_is_a_failure(plain_page: Harness) -> None:
+    h = plain_page
+    h.server.fail_once = {2: (428, "Something else went wrong.")}
+    h.upload_and_download()
+    h.download_part(2)
+    expect(h.status()).to_have_text("Part 2 of 3 failed. Something else went wrong.")
+    expect(h.part_status(2)).to_have_text("Failed")
+    assert h.server.requests == [(2, False)]  # not sent again with the file

@@ -214,8 +214,17 @@ async def void_batch(
             now=utc_now(),
         )
     except batches.AlreadyVoided:  # voided by someone else meanwhile
+        _forget_rows(request, batch_id)
         view["voided"] = True
         return _void_page(request, view, error=MSG_ALREADY_VOIDED, status_code=409)
     if not done:
         raise not_found()
+    _forget_rows(request, batch_id)  # after the commit: a void cannot be undone
     return redirect(HISTORY_PATH)
+
+
+def _forget_rows(request: Request, batch_id: int) -> None:
+    """Drop the voided batch's checked rows from the upload cache (``app.upload_cache``)."""
+    cache = getattr(request.app.state, "upload_cache", None)
+    if cache is not None:
+        cache.discard(batch_id)

@@ -33,6 +33,22 @@ _REWRITE_SCHEMES = ("postgresql://", "postgres://")
 DEFAULT_PUBLIC_BASE_URL = "http://127.0.0.1:8000"
 _MASK = "**********"
 
+# Performance and limits (see README, "Size and speed"). Defaults are the product values;
+# the limits are raised only for local benchmarks (scripts/bench.py).
+DEFAULT_GENERATE_SLOTS = 1  # /generate jobs at once per process; 0.5 CPU gains nothing from 2
+DEFAULT_UPLOAD_CACHE_MB = 150  # checked rows kept between /validate and /generate (0 = off)
+DEFAULT_UPLOAD_CACHE_TTL_MINUTES = 30  # after last use
+DEFAULT_MAX_ROWS = 10_000  # data rows per upload (app.core.parser.MAX_ROWS)
+DEFAULT_MAX_UPLOAD_MB = 5  # data file size (app.web.routes.MAX_UPLOAD_BYTES)
+# (name, minimum, maximum) of each integer setting
+_INT_BOUNDS: dict[str, tuple[int, int]] = {
+    "GENERATE_SLOTS": (1, 16),
+    "UPLOAD_CACHE_MB": (0, 4096),
+    "UPLOAD_CACHE_TTL_MINUTES": (1, 24 * 60),
+    "MAX_ROWS": (1, 1_000_000),
+    "MAX_UPLOAD_MB": (1, 1024),
+}
+
 
 class SettingsError(RuntimeError):
     """Settings are missing or invalid. Messages name variables, never their values."""
@@ -99,6 +115,11 @@ class Settings:
     fingerprint_key: Secret | None = None
     # Where users reach the app; the admin CLI builds invite and reset links from it.
     public_base_url: str = DEFAULT_PUBLIC_BASE_URL
+    generate_slots: int = DEFAULT_GENERATE_SLOTS
+    upload_cache_mb: int = DEFAULT_UPLOAD_CACHE_MB
+    upload_cache_ttl_minutes: int = DEFAULT_UPLOAD_CACHE_TTL_MINUTES
+    max_rows: int = DEFAULT_MAX_ROWS
+    max_upload_mb: int = DEFAULT_MAX_UPLOAD_MB
 
     @property
     def is_production(self) -> bool:
@@ -108,6 +129,10 @@ class Settings:
     def cookie_secure(self) -> bool:
         """``Secure`` + ``__Host-`` cookies. Off in development, which runs on plain http."""
         return self.is_production
+
+    @property
+    def max_upload_bytes(self) -> int:
+        return self.max_upload_mb * 1024 * 1024
 
     @property
     def safe_database_url(self) -> str | None:
@@ -126,6 +151,17 @@ def _optional(environ: Mapping[str, str], name: str) -> str | None:
 def _secret(environ: Mapping[str, str], name: str) -> Secret | None:
     value = _optional(environ, name)
     return Secret(value) if value is not None else None
+
+
+def _int(environ: Mapping[str, str], name: str, default: int) -> int:
+    """An integer setting within ``_INT_BOUNDS``; ``default`` when unset or blank."""
+    value = _optional(environ, name)
+    if value is None:
+        return default
+    low, high = _INT_BOUNDS[name]
+    if not value.isascii() or not value.isdigit() or not low <= int(value) <= high:
+        raise SettingsError(f"{name} must be a whole number from {low} to {high}")
+    return int(value)
 
 
 def _url(environ: Mapping[str, str], name: str) -> Secret | None:
@@ -178,6 +214,13 @@ def load_settings(environ: Mapping[str, str]) -> Settings:
         secret_key=_secret(environ, "SECRET_KEY"),
         fingerprint_key=_secret(environ, "FINGERPRINT_KEY"),
         public_base_url=base_url or DEFAULT_PUBLIC_BASE_URL,
+        generate_slots=_int(environ, "GENERATE_SLOTS", DEFAULT_GENERATE_SLOTS),
+        upload_cache_mb=_int(environ, "UPLOAD_CACHE_MB", DEFAULT_UPLOAD_CACHE_MB),
+        upload_cache_ttl_minutes=_int(
+            environ, "UPLOAD_CACHE_TTL_MINUTES", DEFAULT_UPLOAD_CACHE_TTL_MINUTES
+        ),
+        max_rows=_int(environ, "MAX_ROWS", DEFAULT_MAX_ROWS),
+        max_upload_mb=_int(environ, "MAX_UPLOAD_MB", DEFAULT_MAX_UPLOAD_MB),
     )
 
     if production:

@@ -37,6 +37,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from app.auth import retention
 from app.db.engine import make_engine
 from app.settings import Settings, check_web_settings, get_settings
+from app.upload_cache import UploadCache
 from app.web import admin, auth, history, public, team
 from app.web.routes import router
 
@@ -168,6 +169,11 @@ def create_app(
     )
     app.state.settings = settings
     app.state.sessionmaker = sessions
+    # Checked rows between /validate and /generate, in this process's memory only.
+    app.state.upload_cache = UploadCache(
+        max_bytes=settings.upload_cache_mb * 1024 * 1024,
+        ttl_seconds=settings.upload_cache_ttl_minutes * 60,
+    )
     app.add_exception_handler(Exception, _generic_error)
     app.add_exception_handler(auth.AuthError, auth.handle_auth_error)
     app.add_middleware(SecurityHeadersMiddleware)

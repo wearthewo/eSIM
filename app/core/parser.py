@@ -68,16 +68,18 @@ class ParsedUpload:
         return EMAIL_COLUMN in self.columns
 
 
-def parse_table(data: bytes, filename: str) -> ParsedUpload:
+def parse_table(data: bytes, filename: str, *, max_rows: int | None = None) -> ParsedUpload:
     """Pick the parser from the file extension; return the records and the columns present.
 
-    Raises ``ParseError`` for unsupported extensions or unreadable content.
+    ``max_rows`` defaults to ``MAX_ROWS`` (the product limit); the web app passes its
+    setting, which only benchmarks raise. Raises ``ParseError`` for unsupported
+    extensions, unreadable content or too many rows.
     """
     extension = os.path.splitext(filename or "")[1].lower()
     if extension == ".csv":
-        return _parse_csv(data)
+        return _parse_csv(data, max_rows)
     if extension == ".xlsx":
-        return _parse_xlsx(data)
+        return _parse_xlsx(data, max_rows)
     raise ParseError("Unsupported file type. Upload a .csv or .xlsx file.")
 
 
@@ -97,7 +99,7 @@ def parse_csv(data: bytes) -> list[EsimRecord]:
     return _parse_csv(data).records
 
 
-def _parse_csv(data: bytes) -> ParsedUpload:
+def _parse_csv(data: bytes, max_rows: int | None = None) -> ParsedUpload:
     try:
         text = data.decode("utf-8-sig")
     except UnicodeDecodeError:
@@ -115,7 +117,7 @@ def _parse_csv(data: bytes) -> ParsedUpload:
     header = [cell.strip() for cell in rows[0]]
     columns = normalize_headers(header)
     numbered = ((number, [_trim(c) for c in row]) for number, row in enumerate(rows[1:], start=2))
-    return ParsedUpload(_build_records(numbered, columns), frozenset(columns))
+    return ParsedUpload(_build_records(numbered, columns, max_rows), frozenset(columns))
 
 
 def parse_xlsx(data: bytes) -> list[EsimRecord]:
@@ -134,7 +136,7 @@ def parse_xlsx(data: bytes) -> list[EsimRecord]:
     return _parse_xlsx(data).records
 
 
-def _parse_xlsx(data: bytes) -> ParsedUpload:
+def _parse_xlsx(data: bytes, max_rows: int | None = None) -> ParsedUpload:
     from openpyxl import load_workbook
 
     try:
@@ -161,7 +163,7 @@ def _parse_xlsx(data: bytes) -> ParsedUpload:
             (number, _xlsx_cells(number, row, names_by_index, width))
             for number, row in enumerate(data_rows, start=2)
         )
-        return ParsedUpload(_build_records(numbered, columns), frozenset(columns))
+        return ParsedUpload(_build_records(numbered, columns, max_rows), frozenset(columns))
     finally:
         workbook.close()
 
@@ -257,20 +259,22 @@ def _trim(value: str | None) -> Cell:
 
 
 def _build_records(
-    rows: Iterable[tuple[int, list[Cell]]], columns: dict[str, int]
+    rows: Iterable[tuple[int, list[Cell]]], columns: dict[str, int], max_rows: int | None = None
 ) -> list[EsimRecord]:
-    """Turn trimmed rows into records, skipping blank rows and enforcing ``MAX_ROWS``.
+    """Turn trimmed rows into records, skipping blank rows and enforcing ``max_rows``
+    (``MAX_ROWS`` when ``None``).
 
     A row is blank when every known column is empty; values in unknown columns
     are ignored, so CSV and XLSX skip exactly the same rows.
     """
+    limit = MAX_ROWS if max_rows is None else max_rows
     indices = tuple(columns.values())
     records: list[EsimRecord] = []
     for number, cells in rows:
         if all(i >= len(cells) or cells[i] is None for i in indices):
             continue
-        if len(records) >= MAX_ROWS:
-            raise ParseError(f"Too many rows: the limit is {MAX_ROWS} data rows per upload.")
+        if len(records) >= limit:
+            raise ParseError(f"Too many rows: the limit is {limit} data rows per upload.")
         records.append(_build_record(number, cells, columns))
     return records
 

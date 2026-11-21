@@ -475,15 +475,15 @@ def _needed_px(points: float) -> int:
     return round(points / 72 * render.LOGO_DPI)
 
 
-def test_render_pdf_large_logo_is_downscaled_to_300dpi_and_keeps_transparency() -> None:
+def test_render_pdf_large_logo_is_downscaled_to_logo_dpi_and_keeps_transparency() -> None:
     branding = Branding(company_name="Example", logo_png=_logo_box((2000, 800)))
     data = render.render_pdf(RECORD, branding)
     [(width, height)] = image_draws(data)  # drawn size is unchanged by the downscale
     assert (width, height) == pytest.approx((render.LOGO_MAX_WIDTH, render.LOGO_MAX_HEIGHT))
     images = logo_images(data)
     for head, _ in images.values():
-        assert _dict_int(head, b"Width") == _needed_px(render.LOGO_MAX_WIDTH)  # 591
-        assert _dict_int(head, b"Height") == _needed_px(render.LOGO_MAX_HEIGHT)  # 236
+        assert _dict_int(head, b"Width") == _needed_px(render.LOGO_MAX_WIDTH)  # 394
+        assert _dict_int(head, b"Height") == _needed_px(render.LOGO_MAX_HEIGHT)  # 157
     colour_head, colour = images["colour"]
     mask_head, mask = images["mask"]
     assert b"/ColorSpace /DeviceRGB" in colour_head
@@ -513,6 +513,35 @@ def test_render_pdf_photo_logo_uses_jpeg_when_smaller() -> None:
     assert b"/FlateDecode" in mask_head  # the soft mask is always lossless
     alpha = flate_image(mask_head, mask)
     assert alpha.size == (_needed_px(render.LOGO_MAX_WIDTH), _needed_px(render.LOGO_MAX_HEIGHT))
+
+
+def test_logo_resolution_is_capped_at_200_dpi_of_its_printed_size() -> None:
+    # 1600 x 600 drawn at 5 cm x 1.875 cm: 394 x 148 px at 200 dpi (591 x 221 at 300).
+    assert render.LOGO_DPI == 200
+    data = render.render_pdf(
+        RECORD, Branding(company_name="Example", logo_png=_logo_box((1600, 600)))
+    )
+    [(width, height)] = image_draws(data)  # the layout is unchanged
+    assert width == pytest.approx(render.LOGO_MAX_WIDTH)
+    assert height == pytest.approx(render.LOGO_MAX_WIDTH * 600 / 1600)
+    for head, _ in logo_images(data).values():
+        assert (_dict_int(head, b"Width"), _dict_int(head, b"Height")) == (394, 148)
+
+
+def test_detailed_jpeg_logo_is_kept_when_the_optimizer_buffer_is_too_small() -> None:
+    # Pillow's optimizing JPEG encoder fails ("Suspension not allowed here") when the
+    # image compresses to more than its ~width x height byte buffer; the logo must
+    # still be embedded (as a non-optimized JPEG), never silently dropped.
+    branding = Branding(company_name="Example", logo_png=_photo_logo((1600, 600)))
+    prepared = render.prepare_branding(branding)
+    assert prepared.logo is not None
+    image = prepared.logo.image
+    assert image.filter == "DCTDecode" and (image.width, image.height) == (394, 148)
+    assert len(image.data) > image.width * image.height  # past the optimizer's buffer
+    decoded = Image.open(io.BytesIO(image.data))
+    assert decoded.format == "JPEG" and decoded.size == (394, 148)
+    data = render.render_pdf(RECORD, prepared)
+    assert len(image_draws(data)) == 1
 
 
 def test_render_pdf_opaque_logo_has_no_soft_mask() -> None:

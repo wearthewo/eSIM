@@ -1,9 +1,11 @@
 """End-to-end orchestration: parse -> validate -> render -> zip, all in memory.
 
 Large uploads are generated in parts of ``GENERATE_CHUNK_ROWS`` rows, one ZIP per
-part, so no single archive gets too big to build and download. Nothing is kept
-between calls: every part call gets the whole upload, validates all of it (so
-duplicates are caught across parts) and renders only its own rows.
+part, so no single archive gets too big to build and download. This module keeps
+nothing between calls. ``process_upload`` validates the whole upload on every call (so
+duplicates are caught across parts) and renders only the part's rows; the web app
+instead checks the file once and keeps the checked rows in memory between parts
+(``app.upload_cache``), then calls ``build_part`` per part.
 
 Never log activation codes, confirmation codes, or file contents.
 """
@@ -11,6 +13,7 @@ Never log activation codes, confirmation codes, or file contents.
 from __future__ import annotations
 
 import threading
+from collections.abc import Iterable, Sequence
 
 from app.core.models import Branding, EsimRecord, ValidationReport
 from app.core.parser import ParsedUpload, parse_table
@@ -61,9 +64,12 @@ def _ensure_fonts() -> None:
             _fonts_ready = True
 
 
-def check_upload(data: bytes, filename: str) -> tuple[ParsedUpload, ValidationReport]:
-    """Parse and validate only (no rendering). ``ParseError`` propagates to the caller."""
-    parsed = parse_table(data, filename)
+def check_upload(
+    data: bytes, filename: str, *, max_rows: int | None = None
+) -> tuple[ParsedUpload, ValidationReport]:
+    """Parse and validate only (no rendering). ``max_rows`` defaults to the parser's
+    ``MAX_ROWS``. ``ParseError`` propagates to the caller."""
+    parsed = parse_table(data, filename, max_rows=max_rows)
     return parsed, validate(parsed.records, has_email_column=parsed.has_email)
 
 
@@ -83,9 +89,16 @@ def part_records(
     report: ValidationReport, part: int, chunk_rows: int | None = None
 ) -> list[EsimRecord]:
     """The valid records of ``part`` (1-based): at most ``chunk_rows`` of them."""
+    return part_slice(report.valid, part, chunk_rows)
+
+
+def part_slice(
+    records: Sequence[EsimRecord], part: int, chunk_rows: int | None = None
+) -> list[EsimRecord]:
+    """The records of ``part`` (1-based) of ``records``: at most ``chunk_rows`` of them."""
     size = _chunk(chunk_rows)
     start = (part - 1) * size
-    return report.valid[start : start + size]
+    return list(records[start : start + size])
 
 
 def process_upload(
@@ -125,12 +138,20 @@ def build_part(
 
     The caller has checked the part (``check_part``) and that ``report`` has no errors.
     """
+    return build_zip_for(
+        part_records(report, part, chunk_rows), branding, has_email=parsed.has_email
+    )
+
+
+def build_zip_for(records: Iterable[EsimRecord], branding: Branding, *, has_email: bool) -> bytes:
+    """The ZIP of ``records`` (one part's valid rows): one PDF each, the manifest and,
+    when ``has_email`` (the upload has an ``email`` column), the mail-merge sheet."""
     _ensure_fonts()
-    prepared = prepare_branding(branding)  # colour and decoded logo, once per batch
+    prepared = prepare_branding(branding)  # colour and decoded logo, once per part
     files: list[tuple[str, bytes]] = []
     manifest_rows: list[tuple[int, str, str]] = []
     mailmerge_rows: list[tuple[str, str, str, str, str]] = []
-    for record in part_records(report, part, chunk_rows):
+    for record in records:
         name = sanitize_filename(pdf_filename(record))
         files.append((name, render_pdf(record, prepared)))
         manifest_rows.append((record.row_number, record.iccid, name))
@@ -144,5 +165,5 @@ def build_part(
             )
         )
 
-    mailmerge = build_mailmerge(mailmerge_rows) if parsed.has_email else None
+    mailmerge = build_mailmerge(mailmerge_rows) if has_email else None
     return build_zip(files, build_manifest(manifest_rows), mailmerge)

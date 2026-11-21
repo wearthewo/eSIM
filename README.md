@@ -94,7 +94,12 @@ points at the same database as `DATABASE_URL`.
 
 Scripts (synthetic data only, output goes to the gitignored `output/`):
 
-- `scripts/bench.py --rows 10000 [--names same|pool|unique]`: time the full pipeline.
+- `scripts/bench.py --rows 10000 [--names same|pool|unique|ascii] [--chunk N]`: time
+  a whole order end to end through the real app on `TEST_DATABASE_URL` (/validate,
+  then every part from the upload cache, one part through the 428 fallback), with
+  estimates for Render Starter and Standard. `--rows` up to 100,000 (the app's limits
+  are raised for that run only). `--core`: no database, the pipeline only (for
+  calibrating on the target machine).
 - `scripts/make_big_csv.py`: write a synthetic CSV for load tests.
 - `scripts/sample_pdfs.py`: render the fixture PDFs so you can look at them.
 - `scripts/screens.py`: screenshot every page at desktop (1440 px) and phone (390 px)
@@ -128,8 +133,9 @@ with system fonts as fallback.
   bundled in `app/core/assets/fonts`), and ReportLab embeds a subset of it.
   User text is never bold; the layout uses size for emphasis, so ASCII and
   Greek pages look the same.
-- **Logo**: decoded once per batch and downscaled (box filter, never enlarged)
-  to the pixels needed at 300 dpi for its printed size (max 5 x 2 cm).
+- **Logo**: decoded once per part and downscaled (box filter, never enlarged)
+  to the pixels needed at 200 dpi for its printed size (max 5 x 2 cm, so at most
+  394 x 157 px).
   It is then stored as PNG (Flate with PNG predictors) or JPEG, whichever is
   smaller. Transparency is kept as a lossless soft mask.
 - **QR code**: vector rectangles that encode only the activation code. The
@@ -138,24 +144,43 @@ with system fonts as fallback.
 
 ## Size and speed
 
-Measured on the development machine with Python 3.14, ReportLab 5.1 and
-Pillow 13. The test logo is a 1600 x 600 RGBA PNG; per-PDF figures are means
-over 500 PDFs.
+Measured on the development machine (Intel Core, Windows 11) with Python 3.14,
+ReportLab 5.1 and Pillow 13. Timings vary by 10-20% with machine load.
 
-| Names                 | PDF size | of which font | of which logo | render time |
-|-----------------------|---------:|--------------:|--------------:|------------:|
-| ASCII                 |  17.3 KB |        0.2 KB |       14.1 KB |   11-16 ms  |
-| Greek                 |  39.7 KB |       22.5 KB |       14.1 KB |     ~21 ms  |
-| Greek, unique per row |  39.7 KB |       22.5 KB |       14.1 KB |     ~21 ms  |
+**Logo** (a 1600 x 600 RGBA PNG, drawn at 5 x 1.875 cm). The logo is the largest
+part of an ASCII PDF, so it is stored at 200 dpi of its printed size (was 300):
 
-Greek PDFs carry their own DejaVu Sans subset (about 20 KB), which is built
+| Logo stored at | Pixels    | Flat logo (shapes + text) | ASCII PDF | Photo-like logo |
+|----------------|-----------|--------------------------:|----------:|----------------:|
+| 300 dpi        | 591 x 221 |                   12.7 KB |   16.3 KB |        109.2 KB |
+| 200 dpi        | 394 x 148 |                    8.4 KB |   12.0 KB |         70.5 KB |
+
+**Per PDF**, end to end (`scripts/bench.py --rows 1000`, parts from the upload
+cache, including ZIP, `record_part` and HTTP):
+
+| Names | Flat logo above | Small QR logo (bench default) |
+|-------|-----------------|-------------------------------|
+| ASCII | 13.5 ms, 12.2 KB | 12.8 ms, 5.1 KB |
+| Greek | 22.0 ms, 34.7 KB | 21.1 ms, 27.6 KB |
+
+Greek PDFs carry their own DejaVu Sans subset (about 22 KB), which is built
 again for each PDF. That is the main cost of non-ASCII names. Unique names per
 row are no worse than repeated ones. Building the subsets is serialised (a
 lock around ReportLab's save), because ReportLab's TrueType parser is not
 thread-safe.
 
-Full run, `scripts/bench.py --rows 10000` (same Greek name on every row, bench
-logo, every part re-validates the whole file):
+**A 10,000-row order** (`scripts/bench.py --rows 10000 --names pool`, Greek names):
 
-- total about 210-240 s (10.2-15.8 s per part, varies with machine load)
-- total size 284.8 MB, 14.24 MB per part, 27.8 KB per PDF
+- /validate (parse, validate, duplicate check, cache): about 1.0 s, of which
+  parse + validate 0.5 s and the duplicate check 0.46 s.
+- All 20 parts: about 213-216 s, 21.3-21.8 ms per PDF, 282 MB of ZIPs (14.1 MB
+  per part). Before the upload cache each part also re-parsed and re-checked the
+  whole file (about 1 s per part, 20 s per order) and uploaded it again.
+- Peak process memory 261 MB with parts of 500 rows, 304 MB with parts of 1,000.
+  Parts of 1,000 are not faster (211-222 s), so new batches keep 500.
+- Cached rows: about 700 bytes per row, 6.7 MB for 10,000 rows (UPLOAD_CACHE_MB,
+  default 150).
+- Estimated on Render: Starter (0.5 CPU) 7-10.5 min, Standard (1 CPU) 3.5-5.3 min.
+  The script measures CPU time per stage and assumes a Render vCPU is 1.0-1.5x
+  slower than this machine's core; `scripts/bench.py --core --rows 500` on the
+  instance calibrates that factor.

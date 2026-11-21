@@ -241,18 +241,44 @@
     });
   }
 
-  // Request part n with the data captured when the download started. Resolves with the
-  // response of a ZIP; rejects with { failure, message, table } when the server refused
-  // the part, or { loggedOut } (after sending the page to the login page).
+  // The server keeps the checked rows of the batch after /validate, so a part is first
+  // requested without the data file. When it no longer has them (restart, expiry), it
+  // answers 428 with this header and the same part is sent again with the file, which
+  // fills its cache again: the user never has to choose the file again.
+  var UPLOAD_NEEDED_STATUS = 428;
+  var UPLOAD_NEEDED_HEADER = "X-Esim-Upload-Needed";
+
+  function withoutFile(data) {
+    var copy = new FormData();
+    data.forEach(function (value, key) { if (key !== "file") copy.append(key, value); });
+    return copy;
+  }
+
+  function uploadNeeded(response) {
+    return response.status === UPLOAD_NEEDED_STATUS &&
+      response.headers.get(UPLOAD_NEEDED_HEADER) === "1";
+  }
+
+  // Request part n with the data captured when the download started (without the file
+  // first, see above). Resolves with the response of a ZIP; rejects with
+  // { failure, message, table } when the server refused the part, or { loggedOut }
+  // (after sending the page to the login page).
   function fetchPart(current, n, signal) {
     current.data.set("part", String(n));
     current.data.set("parts", String(current.parts));
-    return fetch(current.url, {
-      method: "POST",
-      body: current.data,
-      credentials: "same-origin",
-      headers: { "X-CSRF-Token": String(current.data.get("csrf_token") || "") },
-      signal: signal
+    function send(body) {
+      return fetch(current.url, {
+        method: "POST",
+        body: body,
+        credentials: "same-origin",
+        headers: { "X-CSRF-Token": String(current.data.get("csrf_token") || "") },
+        signal: signal
+      });
+    }
+    return send(withoutFile(current.data)).then(function (response) {
+      if (!uploadNeeded(response)) return response;
+      if (response.body) response.body.cancel().catch(function () {});
+      return send(current.data);
     }).then(function (response) {
       // Logged out meanwhile (session expired): the server redirected to the login page.
       if (response.status === 401 || response.redirected) {

@@ -72,7 +72,10 @@ QR_BORDER = 2  # quiet zone, in modules
 MARGIN = 2 * cm
 LOGO_MAX_WIDTH = 5 * cm
 LOGO_MAX_HEIGHT = 2 * cm
-LOGO_DPI = 300  # the logo is downscaled to this resolution at its printed size
+# The logo is downscaled to this resolution at its printed size (at most 5 x 2 cm, so at
+# most 394 x 157 px). 200 dpi is sharp on office and laser printers; 300 dpi made the
+# logo about 50% larger in every PDF (README, "Size and speed").
+LOGO_DPI = 200
 LOGO_JPEG_QUALITY = 90
 TEXT_GREY = HexColor("#444444")
 CONFIRMATION_NOTE = "A confirmation code will be sent separately."
@@ -437,9 +440,7 @@ def _logo_pixels(source: Image.Image, ratio: float) -> tuple[Image.Image, Image.
 def _encode_smallest(image: Image.Image, smask: str | None) -> _EncodedImage:
     """Encode ``image`` as PNG and as JPEG and keep the smaller (PNG on a tie)."""
     png = _encode_lossless(_LOGO_NAME, image, smask)
-    out = io.BytesIO()
-    image.save(out, "JPEG", quality=LOGO_JPEG_QUALITY, optimize=True, subsampling=0)
-    jpeg = out.getvalue()
+    jpeg = _jpeg(image)
     if len(jpeg) >= len(png.data):
         return png
     return _EncodedImage(
@@ -452,6 +453,23 @@ def _encode_smallest(image: Image.Image, smask: str | None) -> _EncodedImage:
         columns_colors=None,
         smask=smask,
     )
+
+
+def _jpeg(image: Image.Image) -> bytes:
+    """Baseline JPEG at ``LOGO_JPEG_QUALITY`` with optimized Huffman tables.
+
+    Pillow gives the optimizing encoder an output buffer of about width x height bytes
+    (at least 64 KB); a detailed image that compresses to more than that fails with
+    "Suspension not allowed here". Such an image is encoded without the optimization
+    (no buffer limit, a few percent larger) instead of losing the logo.
+    """
+    out = io.BytesIO()
+    try:
+        image.save(out, "JPEG", quality=LOGO_JPEG_QUALITY, optimize=True, subsampling=0)
+    except OSError:
+        out = io.BytesIO()
+        image.save(out, "JPEG", quality=LOGO_JPEG_QUALITY, subsampling=0)
+    return out.getvalue()
 
 
 def _encode_lossless(name: str, image: Image.Image, smask: str | None = None) -> _EncodedImage:
