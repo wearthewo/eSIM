@@ -22,7 +22,7 @@ tests/ fixtures/ (synthetic data only)
   including activation codes, between /validate and the /generate parts. They live only
   in that structure, in process memory: never logged, repr'd, pickled, copied elsewhere or
   written to disk. Entries are scoped to the organization, expire 30 min after last use
-  (UPLOAD_CACHE_TTL_MINUTES), are evicted LRU over UPLOAD_CACHE_MB (default 150), and are
+  (UPLOAD_CACHE_TTL_MINUTES), are evicted LRU over UPLOAD_CACHE_MB (default 100), and are
   dropped when the batch is completed, fails or is voided. A miss is never an error:
   /generate answers 428 + X-Esim-Upload-Needed and app.js re-sends the part with the file.
 - The confirmation code is never embedded in the QR payload or the built

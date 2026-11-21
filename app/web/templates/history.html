@@ -13,6 +13,9 @@
       {% if is_admin %}Batches of every organization{% else %}Your organization's batches{% endif %},
       newest first. Times are Greek time.
     </p>
+    {% if today_usage %}
+    <p class="today-usage">Today: {{ "{:,}".format(today_usage.used) }} / {{ "{:,}".format(today_usage.quota) }} rows</p>
+    {% endif %}
   </div>
 </div>
 <p class="notice history-note">{{ note }}</p>

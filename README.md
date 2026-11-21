@@ -179,8 +179,39 @@ thread-safe.
 - Peak process memory 261 MB with parts of 500 rows, 304 MB with parts of 1,000.
   Parts of 1,000 are not faster (211-222 s), so new batches keep 500.
 - Cached rows: about 700 bytes per row, 6.7 MB for 10,000 rows (UPLOAD_CACHE_MB,
-  default 150).
+  default 100).
 - Estimated on Render: Starter (0.5 CPU) 7-10.5 min, Standard (1 CPU) 3.5-5.3 min.
   The script measures CPU time per stage and assumes a Render vCPU is 1.0-1.5x
   slower than this machine's core; `scripts/bench.py --core --rows 500` on the
   instance calibrates that factor.
+
+**A 100,000-row order** (`scripts/bench.py --rows 100000 --names pool`, Greek names,
+200 parts of 500; the limits are raised for the benchmark only):
+
+| | |
+|---|---|
+| Parse + validate | 5.4 s |
+| Duplicate check | 4.8 s |
+| /validate, whole request | 11.0 s |
+| Per PDF, parts from the cache | 22.5 ms |
+| Total | 37.9 min |
+| ZIPs | 2.82 GB (14.1 MB per part) |
+| Cached rows | 67 MB (about 700 bytes per row) |
+| Peak process memory | 570 MB |
+| Estimate on Starter (0.5 CPU) | 75-112 min |
+| Estimate on Standard (1 CPU) | 38-56 min |
+
+- The 570 MB peak includes the benchmark client's own copies of the 19 MB file.
+  Measured separately, parsing 100,000 rows peaks at 194 MB and the duplicate check
+  adds 40 MB, so a server alone would still reach about 400-450 MB.
+- A part sent after a forced cache miss (the 428 fallback) cost about 10 s more than a
+  part from the cache. Before the cache every part paid that, about 33 minutes more
+  for this order.
+- **MAX_ROWS stays 10,000 on Render Starter**: 100,000 rows peaked above Starter's
+  512 MB of memory.
+
+**Waiting for a slot**: with GENERATE_SLOTS=1, a part requested while another part is
+being generated queues for up to GENERATE_WAIT_SECONDS (default 60) instead of being
+refused at once. One part of 500 Greek-name rows takes about 21-32 s on Starter (the
+estimate above, per part), so a second user's part waits its turn behind one running
+part. Only after the wait does it get 503 "Server busy" with `Retry-After: 60`.

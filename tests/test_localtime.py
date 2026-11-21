@@ -13,6 +13,7 @@ import pytest
 from app.localtime import (
     MSG_FROM_AFTER_TO,
     DateInputError,
+    daily_reset_athens,
     default_fields,
     format_athens,
     local_to_utc,
@@ -177,3 +178,30 @@ def test_range_over_the_repeated_october_hour_includes_both() -> None:
 def test_bad_ranges(fields: tuple[str, str, str, str], message: str) -> None:
     with pytest.raises(DateInputError, match=message):
         parse_range(*fields, now=NOW)
+
+
+# --- Daily quota reset (the next UTC midnight in Greek time) -------------------------------
+
+
+@pytest.mark.parametrize(
+    ("moment", "reset"),
+    [
+        (utc(2026, 1, 15, 10, 0), "02:00"),  # winter: UTC+2
+        (utc(2026, 7, 15, 10, 0), "03:00"),  # summer: UTC+3
+        (utc(2026, 1, 15, 23, 30), "02:00"),  # 01:30 on the 16th in Athens: in 30 minutes
+        (utc(2026, 1, 15, 0, 0), "02:00"),  # a new UTC day: the next one, not this one
+        (utc(2026, 3, 28, 23, 59), "02:00"),  # resets at 29/03 00:00 UTC, before the change
+        (utc(2026, 3, 29, 0, 30), "03:00"),  # resets at 30/03 00:00 UTC, summer time
+        (utc(2026, 3, 29, 1, 30), "03:00"),
+        (utc(2026, 10, 24, 23, 59), "03:00"),  # resets at 25/10 00:00 UTC, still summer
+        (utc(2026, 10, 25, 0, 30), "02:00"),  # resets at 26/10 00:00 UTC, winter time
+        (utc(2026, 10, 25, 1, 30), "02:00"),
+    ],
+)
+def test_daily_reset_athens(moment: dt.datetime, reset: str) -> None:
+    assert daily_reset_athens(moment) == reset
+
+
+def test_daily_reset_athens_accepts_any_offset() -> None:
+    athens_evening = dt.datetime(2026, 7, 15, 23, 30, tzinfo=dt.timezone(dt.timedelta(hours=3)))
+    assert daily_reset_athens(athens_evening) == "03:00"  # 20:30 UTC: resets at 00:00 UTC

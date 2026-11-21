@@ -55,6 +55,14 @@ def format_athens(value: dt.datetime | None) -> str:
     return to_athens(value).strftime(DATETIME_FORMAT)
 
 
+def daily_reset_athens(now: dt.datetime) -> str:
+    """When the UTC day after ``now`` starts, as Greek ``HH:mm``: 02:00 in winter (EET),
+    03:00 in summer (EEST). Daily quotas (the ``usage`` table) count UTC days."""
+    utc = now.astimezone(dt.UTC)
+    next_midnight = dt.datetime.combine(utc.date() + dt.timedelta(days=1), dt.time(0), dt.UTC)
+    return to_athens(next_midnight).strftime(TIME_FORMAT)
+
+
 def parse_date(value: str, label: str = "From") -> dt.date:
     """A ``dd/mm/yyyy`` field. Raises ``DateInputError``."""
     text = value.strip()

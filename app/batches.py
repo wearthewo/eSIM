@@ -17,6 +17,12 @@ moment cannot both succeed. Voiding (``void``) takes the same lock, and ``record
 refuses a voided batch inside it, so a part finishing during a void cannot re-add
 fingerprints.
 
+Daily quota: ``usage`` counts the rows generated per organization and UTC day. A part
+not recorded yet is refused (``QuotaExceeded``) inside ``record_part``, under the same
+lock, when it would take the day over ``organizations.daily_row_quota``; parts already
+recorded never count again. /validate and /generate also check before any work
+(``check_quota``), and every refusal writes a ``quota_exceeded`` audit row.
+
 Continuing (``continuable``): a re-upload whose only duplicates are the rows of ONE
 unfinished batch (partial or incomplete) of the organization, with the same row count,
 and with every fingerprint of that batch in the same part of the new file (by the
@@ -59,7 +65,7 @@ from app.db.models import (
     Usage,
     User,
 )
-from app.localtime import format_athens
+from app.localtime import daily_reset_athens, format_athens
 
 DUPLICATE_WINDOW = dt.timedelta(days=365)  # "the last 12 months"; also the fingerprint TTL
 STALE_AFTER = dt.timedelta(hours=24)
@@ -80,10 +86,36 @@ CONTINUABLE = frozenset({BatchStatus.PARTIAL, BatchStatus.INCOMPLETE})
 
 # audit_log.action values
 BATCH_VOIDED = "batch_voided"
+QUOTA_EXCEEDED = "quota_exceeded"
+
+MSG_QUOTA = (
+    "Daily limit reached: {used:,} of {quota:,} rows used today. "
+    "The limit resets at {reset} Greek time."
+)
 
 
 class BatchVoided(Exception):
     """The batch was voided: nothing more can be generated for it."""
+
+
+@dataclass(frozen=True, slots=True)
+class DailyUsage:
+    """Rows the organization generated today (UTC day) and its daily row quota."""
+
+    used: int
+    quota: int
+
+    @property
+    def remaining(self) -> int:
+        return max(0, self.quota - self.used)
+
+
+class QuotaExceeded(Exception):
+    """Generating the rows asked for would take the organization over its daily quota."""
+
+    def __init__(self, usage: DailyUsage) -> None:
+        super().__init__("daily row quota exceeded")
+        self.usage = usage
 
 
 class AlreadyVoided(Exception):
@@ -434,6 +466,11 @@ def record_part(
     the part number), count the part and add the rows to today's usage. The status
     becomes partial or completed (also from incomplete or failed). Retries of a part
     change nothing else.
+
+    Daily quota: a part not recorded yet whose rows would take today's usage over the
+    organization's quota raises ``QuotaExceeded`` (nothing is recorded; the caller's
+    transaction rolls back). Under the lock, so two parts at once cannot both pass. A part
+    already recorded (downloaded again) is never counted again or refused.
     """
     _lock_organization(db, organization_id)
     batch = db.scalars(
@@ -443,6 +480,8 @@ def record_part(
     ).one()
     if batch.status == BatchStatus.VOIDED:
         raise BatchVoided
+    if part not in downloaded_parts(db, batch_id):
+        check_quota(db, organization_id, len(records), now=now)
     check = find_used(db, organization_id, records, key=key, now=now, exclude_batch_id=batch_id)
     if check.found:
         return check
@@ -514,6 +553,74 @@ def _add_usage(db: Session, organization_id: int, rows: int, *, now: dt.datetime
             index_elements=[Usage.organization_id, Usage.day],
             set_={"rows_generated": Usage.rows_generated + statement.excluded.rows_generated},
         )
+    )
+
+
+# --- Daily quota ---------------------------------------------------------------------------
+
+
+def daily_usage(db: Session, organization_id: int, *, now: dt.datetime) -> DailyUsage:
+    """Rows generated today (the UTC day of ``now``, as ``_add_usage`` counts) and the quota."""
+    row = db.execute(
+        select(Organization.daily_row_quota, func.coalesce(Usage.rows_generated, 0))
+        .outerjoin(
+            Usage,
+            (Usage.organization_id == Organization.id)
+            & (Usage.day == now.astimezone(dt.UTC).date()),
+        )
+        .where(Organization.id == organization_id)
+    ).one()
+    return DailyUsage(used=int(row[1]), quota=int(row[0]))
+
+
+def check_quota(db: Session, organization_id: int, rows: int, *, now: dt.datetime) -> DailyUsage:
+    """Today's usage, if ``rows`` more fit in the quota; else raises ``QuotaExceeded``.
+
+    Reaching the quota exactly is allowed. A quota of 0 refuses every row.
+    """
+    usage = daily_usage(db, organization_id, now=now)
+    if usage.used + rows > usage.quota:
+        raise QuotaExceeded(usage)
+    return usage
+
+
+def quota_message(usage: DailyUsage, now: dt.datetime) -> str:
+    """The refusal to show, with the reset time in Greek time (02:00 or 03:00, by DST)."""
+    return MSG_QUOTA.format(used=usage.used, quota=usage.quota, reset=daily_reset_athens(now))
+
+
+def audit_quota_exceeded(
+    db: Session,
+    *,
+    now: dt.datetime,
+    user_id: int | None,
+    organization_id: int,
+    ip: IpPrefix | None,
+    batch_id: int | None = None,
+) -> None:
+    """A ``quota_exceeded`` audit row: who, which organization and batch. No counts, no codes."""
+    accounts.audit(
+        db,
+        QUOTA_EXCEEDED,
+        AuditOutcome.FAILURE,
+        now=now,
+        user_id=user_id,
+        organization_id=organization_id,
+        ip=ip,
+        target_batch_id=batch_id,
+    )
+
+
+def part_rows(row_count: int, part: int, chunk_rows: int) -> int:
+    """Rows in ``part`` (1-based) of an upload of ``row_count`` rows in parts of ``chunk_rows``."""
+    return max(0, min(chunk_rows, row_count - (part - 1) * chunk_rows))
+
+
+def remaining_rows(row_count: int, chunk_rows: int, parts: int, downloaded: Iterable[int]) -> int:
+    """Rows in the parts not generated yet (parts in ``downloaded`` never count again)."""
+    done = set(downloaded)
+    return sum(
+        part_rows(row_count, part, chunk_rows) for part in range(1, parts + 1) if part not in done
     )
 
 

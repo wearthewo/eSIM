@@ -89,6 +89,10 @@ async def history_page(
     }
     if user.is_superadmin:
         context["orgs"] = await run_in_threadpool(in_transaction, sessions, batches.organizations)
+    if user.organization_id is not None:  # "Today: X / Y rows" for the user's organization
+        context["today_usage"] = await run_in_threadpool(
+            in_transaction, sessions, batches.daily_usage, user.organization_id, now=now
+        )
 
     # The form shows what was typed (or the defaults), until the input is read.
     shown = default_fields(now)

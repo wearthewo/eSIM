@@ -25,6 +25,13 @@ evicted, server restarted, another worker) a request without the file gets 428 w
 that request is checked in full, as before the cache, and fills the cache again. The
 cached rows are dropped when the batch is completed, failed or voided.
 
+Daily quota (``batches.check_quota``): /validate refuses a file whose rows still to
+generate would take today's usage over the organization's quota, before a batch is made
+(429). /generate checks a part not generated yet before it waits for a job slot, and
+``batches.record_part`` checks again under the organization's lock, so two parts at once
+cannot both pass. A part downloaded again never counts and is never refused. Every
+refusal writes a ``quota_exceeded`` audit row.
+
 Never log request bodies, uploaded filenames, or cell values.
 """
 
@@ -50,16 +57,16 @@ from python_multipart.multipart import MultipartParser, parse_options_header
 from sqlalchemy.orm import Session, sessionmaker
 
 from app import batches
-from app.auth.accounts import CurrentUser
-from app.batches import Continuation, UsedSummary
+from app.auth.accounts import CurrentUser, IpPrefix
+from app.batches import Continuation, DailyUsage, UsedSummary
 from app.core import pipeline, sheets
 from app.core.models import Branding, EsimRecord, ParseError, ValidationReport
 from app.core.parser import MAX_ROWS, SUPPORTED_EXTENSIONS, ParsedUpload
 from app.core.pipeline import PartError, check_upload
 from app.db.models import Batch, BatchStatus
-from app.settings import DEFAULT_GENERATE_SLOTS
+from app.settings import DEFAULT_GENERATE_SLOTS, DEFAULT_GENERATE_WAIT_SECONDS
 from app.upload_cache import CachedUpload, UploadCache
-from app.web.auth import require_user, sessions_of, utc_now
+from app.web.auth import client_ip_prefix, require_user, sessions_of, utc_now
 from app.web.templating import templates
 
 # Product limits. Settings (MAX_UPLOAD_MB, MAX_ROWS) default to these; only local
@@ -83,10 +90,10 @@ JPEG_SIGNATURE = b"\xff\xd8\xff"
 MAX_LOGO_SIDE_PX = 2000  # width and height, read from the image header before decoding
 
 # PDF generation is CPU- and memory-heavy: at most ``Settings.generate_slots`` /generate
-# jobs (GENERATE_SLOTS, default 1) run at once per process. Further requests wait up to
-# JOB_WAIT_SECONDS, then get a 503.
-JOB_WAIT_SECONDS = 5.0
+# jobs (GENERATE_SLOTS, default 1) run at once per process. Further requests queue for up
+# to ``Settings.generate_wait_seconds`` (GENERATE_WAIT_SECONDS, default 60), then get a 503.
 BUSY_RETRY_AFTER_SECONDS = 60
+QUOTA_STATUS = 429  # Too Many Requests: the organization's daily row quota is used up
 
 MAX_ISSUES_SHOWN = 200  # rows of the issue table; the summary always counts them all
 _PART_NUMBER = re.compile(r"[0-9]{1,4}")  # ASCII digits only
@@ -552,6 +559,41 @@ def _fingerprint_key(request: Request) -> bytes:
     return key.reveal().encode("utf-8")
 
 
+class QuotaRefused(Exception):
+    """The organization's daily row quota is used up. ``message`` is safe to show."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
+
+
+def _over_quota(
+    db: Session,
+    organization_id: int,
+    rows: int,
+    now: datetime,
+    *,
+    user_id: int | None,
+    ip: IpPrefix | None,
+    batch_id: int | None = None,
+) -> DailyUsage | None:
+    """``None`` if ``rows`` more fit in today's quota; else today's usage, after adding the
+    ``quota_exceeded`` audit row to the transaction (which the caller commits)."""
+    try:
+        batches.check_quota(db, organization_id, rows, now=now)
+    except batches.QuotaExceeded as exc:
+        batches.audit_quota_exceeded(
+            db,
+            now=now,
+            user_id=user_id,
+            organization_id=organization_id,
+            ip=ip,
+            batch_id=batch_id,
+        )
+        return exc.usage
+    return None
+
+
 def _check(
     sessions: sessionmaker[Session],
     key: bytes,
@@ -562,34 +604,58 @@ def _check(
     *,
     cache: UploadCache | None = None,
     max_rows: int | None = None,
+    ip: IpPrefix | None = None,
 ) -> Results:
     """Parse, validate, check against earlier batches; a file that passes gets a batch.
 
     A file whose only duplicates are an unfinished batch's own rows, in the same parts,
     continues that batch (``batches.continuable``): no new batch, the old id is reused.
     Either way the checked rows go into ``cache`` under the batch id, for /generate.
-    Raises ``ParseError``.
+
+    A file that passes is refused when its rows still to generate (all of them for a new
+    batch; the parts not downloaded yet for a continued one) would take today's usage over
+    the quota: no batch, nothing cached, a ``quota_exceeded`` audit row, and
+    ``QuotaRefused``. Raises ``ParseError``.
     """
     parsed, report = check_upload(upload.data, upload.filename, max_rows=max_rows)
     if not parsed.records:
         raise ParseError(MSG_NO_ROWS)
     row_count = len(parsed.records)
     chunk_rows = pipeline.GENERATE_CHUNK_ROWS  # a new batch keeps today's part size
+    refused: DailyUsage | None = None
+    results: Results | None = None
     with sessions.begin() as db:
         used = batches.find_used(db, organization_id, report.valid, key=key, now=now)
         continuation = batches.continuable(db, organization_id, report, used, row_count=row_count)
         if continuation is not None:
-            results = Results(
-                row_count=row_count,
-                report=report,
-                batch_id=continuation.batch_id,
-                continuation=continuation,
+            to_generate = batches.remaining_rows(
+                row_count, continuation.chunk_rows, continuation.parts, continuation.downloaded
             )
-            chunk_rows = continuation.chunk_rows
+            refused = _over_quota(
+                db,
+                organization_id,
+                to_generate,
+                now,
+                user_id=user.user_id,
+                ip=ip,
+                batch_id=continuation.batch_id,
+            )
+            if refused is None:
+                results = Results(
+                    row_count=row_count,
+                    report=report,
+                    batch_id=continuation.batch_id,
+                    continuation=continuation,
+                )
+                chunk_rows = continuation.chunk_rows
         else:
             report = batches.merge(report, used)
             batch_id = None
             if report.ok:
+                refused = _over_quota(
+                    db, organization_id, row_count, now, user_id=user.user_id, ip=ip
+                )
+            if report.ok and refused is None:
                 batch_id = batches.create_batch(
                     db,
                     organization_id=organization_id,
@@ -604,6 +670,10 @@ def _check(
             results = Results(
                 row_count=row_count, report=report, used=used.summary, batch_id=batch_id
             )
+    if refused is not None:  # the audit row is committed
+        raise QuotaRefused(batches.quota_message(refused, now))
+    if results is None:  # not reached: set whenever nothing was refused
+        raise RuntimeError("no results")
     if cache is not None and results.batch_id is not None:  # committed: cache the rows
         _remember(cache, organization_id, results.batch_id, chunk_rows, parsed, report)
     return results
@@ -676,6 +746,8 @@ def _generate_part(
     *,
     cache: UploadCache | None = None,
     max_rows: int | None = None,
+    user_id: int | None = None,
+    ip: IpPrefix | None = None,
 ) -> PartOutcome:
     """Render one part of the batch and record it. Errors mark the batch ``failed``.
 
@@ -691,8 +763,10 @@ def _generate_part(
 
     Raises ``BatchGone`` (checked first, so another organization's batch id never
     reaches the cache), ``batches.BatchVoided``, ``UploadNeeded``, ``PartError`` (also
-    when the file or cached rows do not match the batch) and ``ParseError``. No database
-    connection is held while PDFs render.
+    when the file or cached rows do not match the batch), ``ParseError``, and
+    ``QuotaRefused`` when ``record_part`` finds the daily quota used up meanwhile (nothing
+    is recorded, a ``quota_exceeded`` audit row is written, the cached rows are kept). No
+    database connection is held while PDFs render.
     """
     with sessions.begin() as db:
         batch = batches.scoped_batch(db, organization_id, batch_id)
@@ -731,21 +805,65 @@ def _generate_part(
 
     archive = pipeline.build_zip_for(rows.records, branding, has_email=rows.has_email)
     completed = False
-    with sessions.begin() as db:
-        race = batches.record_part(  # raises BatchVoided if voided meanwhile
-            db, organization_id, batch_id, part, rows.records, key=key, now=now
-        )
-        if race.found:  # another batch generated the same codes meanwhile
-            report = batches.merge(rows.report, race)
-            batches.mark_failed(db, organization_id, batch_id, report)
-        else:
-            recorded = db.get(Batch, batch_id)  # loaded by record_part: no query
-            completed = recorded is not None and recorded.status == BatchStatus.COMPLETED
+    try:
+        with sessions.begin() as db:
+            race = batches.record_part(  # raises BatchVoided if voided meanwhile
+                db, organization_id, batch_id, part, rows.records, key=key, now=now
+            )
+            if race.found:  # another batch generated the same codes meanwhile
+                report = batches.merge(rows.report, race)
+                batches.mark_failed(db, organization_id, batch_id, report)
+            else:
+                recorded = db.get(Batch, batch_id)  # loaded by record_part: no query
+                completed = recorded is not None and recorded.status == BatchStatus.COMPLETED
+    except batches.QuotaExceeded as exc:  # another part used up the quota meanwhile
+        with sessions.begin() as db:
+            batches.audit_quota_exceeded(
+                db,
+                now=now,
+                user_id=user_id,
+                organization_id=organization_id,
+                ip=ip,
+                batch_id=batch_id,
+            )
+        raise QuotaRefused(batches.quota_message(exc.usage, now)) from None
     if cache is not None and (race.found or completed):
         cache.discard(batch_id)
     if race.found:
         return PartOutcome(Results(rows.row_count, report, race.summary), None)
     return PartOutcome(Results(rows.row_count, rows.report), archive)
+
+
+def _check_part_quota(
+    sessions: sessionmaker[Session],
+    organization_id: int,
+    batch_id: int,
+    part: int,
+    now: datetime,
+    *,
+    user_id: int | None,
+    ip: IpPrefix | None,
+) -> None:
+    """Before /generate waits for a slot: refuse a part not generated yet whose rows
+    (by the batch's own part size) would take today's usage over the quota.
+
+    Raises ``QuotaRefused`` (after committing the ``quota_exceeded`` audit row). Batches
+    that are not the organization's, voided ones and parts that do not exist pass here
+    and are answered by ``_generate_part``. ``record_part`` checks again under the lock.
+    """
+    refused: DailyUsage | None = None
+    with sessions.begin() as db:
+        batch = batches.scoped_batch(db, organization_id, batch_id)
+        if batch is None or batch.status == BatchStatus.VOIDED:
+            return
+        rows = batches.part_rows(batch.row_count, part, batch.chunk_rows)
+        if rows <= 0 or part > batch.parts or part in batches.downloaded_parts(db, batch_id):
+            return
+        refused = _over_quota(
+            db, organization_id, rows, now, user_id=user_id, ip=ip, batch_id=batch_id
+        )
+    if refused is not None:
+        raise QuotaRefused(batches.quota_message(refused, now))
 
 
 def _cached_part(
@@ -859,6 +977,13 @@ def generate_slot_count(request: Request) -> int:
     return settings.generate_slots if settings is not None else DEFAULT_GENERATE_SLOTS
 
 
+def generate_wait_seconds(request: Request) -> float:
+    """``Settings.generate_wait_seconds`` (GENERATE_WAIT_SECONDS): how long a /generate
+    request queues for a free job slot before it gets 503."""
+    settings = getattr(request.app.state, "settings", None)
+    return settings.generate_wait_seconds if settings is not None else DEFAULT_GENERATE_WAIT_SECONDS
+
+
 def _generate_slots(request: Request) -> asyncio.Semaphore:
     """The app's job slots on the running loop.
 
@@ -876,6 +1001,12 @@ def _generate_slots(request: Request) -> asyncio.Semaphore:
     if slots is None:
         slots = per_loop[loop] = asyncio.Semaphore(generate_slot_count(request))
     return slots
+
+
+def today_usage(sessions: sessionmaker[Session], organization_id: int) -> DailyUsage:
+    """The organization's rows generated today and its quota ("Today: X / Y rows")."""
+    with sessions.begin() as db:
+        return batches.daily_usage(db, organization_id, now=utc_now())
 
 
 def _page(
@@ -913,7 +1044,8 @@ async def index(
     """GET /: render the upload form (a message instead for users without an organization)."""
     if user.organization_id is None:
         return _page(request, _form_values(defaults), no_organization=MSG_NO_ORGANIZATION)
-    return _page(request, _form_values(defaults))
+    today = await run_in_threadpool(today_usage, sessions_of(request), user.organization_id)
+    return _page(request, _form_values(defaults), today_usage=today)
 
 
 TEMPLATE_FILENAME = "esim_template.xlsx"
@@ -957,9 +1089,12 @@ async def validate_upload(request: Request, user: User) -> HTMLResponse:
             utc_now(),
             cache=upload_cache_of(request),
             max_rows=limits_of(request).max_rows,
+            ip=client_ip_prefix(request),
         )
     except ParseError as exc:
         return _partial(request, error=str(exc))
+    except QuotaRefused as exc:
+        return _partial(request, QUOTA_STATUS, error=exc.message)
     return _partial(request, results=results)
 
 
@@ -982,8 +1117,10 @@ async def generate(
     Otherwise: the full page with the results table (422; the batch is marked failed),
     the reason the request was rejected (400/413, including a missing batch id and a
     part or file that does not match the batch), 404 for a batch that is not the
-    organization's or no longer exists, 428 (see above), or a busy message (503) when
-    no job slot frees up within ``JOB_WAIT_SECONDS``.
+    organization's or no longer exists, 428 (see above), 429 when the part (not generated
+    before) would exceed the organization's daily row quota, or a busy message (503,
+    ``Retry-After``) when no job slot frees up within ``generate_wait_seconds`` (the
+    request queues behind the running parts until then).
 
     The pipeline runs in a worker thread. The slot is held until that thread
     finishes, even if the client disconnects: the thread call is not abandoned
@@ -1003,15 +1140,31 @@ async def generate(
     if organization_id is None:
         return _page(request, form_values, 404, error=MSG_BATCH_GONE)
 
+    sessions = sessions_of(request)
+    ip = client_ip_prefix(request)
+    try:  # before waiting for a slot: a refused part neither queues nor renders
+        await run_in_threadpool(
+            _check_part_quota,
+            sessions,
+            organization_id,
+            batch_id,
+            part,
+            utc_now(),
+            user_id=user.user_id,
+            ip=ip,
+        )
+    except QuotaRefused as exc:
+        return _page(request, form_values, QUOTA_STATUS, error=exc.message)
+
     slots = _generate_slots(request)
     try:
-        await asyncio.wait_for(slots.acquire(), JOB_WAIT_SECONDS)
+        await asyncio.wait_for(slots.acquire(), generate_wait_seconds(request))
     except TimeoutError:
         return _page(request, form_values, 503, error=MSG_BUSY)
     try:
         outcome = await run_in_threadpool(
             _generate_part,
-            sessions_of(request),
+            sessions,
             _fingerprint_key(request),
             organization_id,
             batch_id,
@@ -1022,7 +1175,11 @@ async def generate(
             utc_now(),
             cache=upload_cache_of(request),
             max_rows=limits_of(request).max_rows,
+            user_id=user.user_id,
+            ip=ip,
         )
+    except QuotaRefused as exc:
+        return _page(request, form_values, QUOTA_STATUS, error=exc.message)
     except BatchGone:
         return _page(request, form_values, 404, error=MSG_BATCH_GONE)
     except batches.BatchVoided:  # the user's own organization's batch: no 404 needed

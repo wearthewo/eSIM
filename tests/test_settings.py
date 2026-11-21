@@ -255,7 +255,8 @@ def test_secret_cannot_be_pickled() -> None:
 def test_performance_defaults() -> None:
     settings = load_settings({})
     assert settings.generate_slots == 1
-    assert settings.upload_cache_mb == 150
+    assert settings.generate_wait_seconds == 60
+    assert settings.upload_cache_mb == 100
     assert settings.upload_cache_ttl_minutes == 30
     assert settings.max_rows == 10_000
     assert settings.max_upload_mb == 5 and settings.max_upload_bytes == 5 * 1024 * 1024
@@ -275,6 +276,7 @@ def test_performance_settings_are_read(env: dict[str, str]) -> None:
         {
             **env,
             "GENERATE_SLOTS": "2",
+            "GENERATE_WAIT_SECONDS": "120",
             "UPLOAD_CACHE_MB": "0",
             "UPLOAD_CACHE_TTL_MINUTES": " 45 ",
             "MAX_ROWS": "100000",
@@ -282,6 +284,7 @@ def test_performance_settings_are_read(env: dict[str, str]) -> None:
         }
     )
     assert settings.generate_slots == 2
+    assert settings.generate_wait_seconds == 120
     assert settings.upload_cache_mb == 0  # the cache is off
     assert settings.upload_cache_ttl_minutes == 45
     assert settings.max_rows == 100_000
@@ -301,6 +304,9 @@ def test_blank_performance_settings_use_the_defaults() -> None:
         ("GENERATE_SLOTS", "1.5"),
         ("GENERATE_SLOTS", "two"),
         ("GENERATE_SLOTS", "\u0662"),  # ARABIC-INDIC DIGIT TWO: not ASCII
+        ("GENERATE_WAIT_SECONDS", "0"),
+        ("GENERATE_WAIT_SECONDS", "601"),
+        ("GENERATE_WAIT_SECONDS", "0.5"),
         ("UPLOAD_CACHE_MB", "-1"),
         ("UPLOAD_CACHE_MB", "5000"),
         ("UPLOAD_CACHE_TTL_MINUTES", "0"),

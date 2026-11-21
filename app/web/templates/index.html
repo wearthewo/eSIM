@@ -9,6 +9,9 @@
       download them as a ZIP file. Orders over {{ chunk_rows }} rows are generated in
       parts of {{ chunk_rows }} rows, one ZIP file per part.
     </p>
+    {% if today_usage %}
+    <p class="today-usage">Today: {{ "{:,}".format(today_usage.used) }} / {{ "{:,}".format(today_usage.quota) }} rows</p>
+    {% endif %}
   </div>
   {% if not no_organization %}
   <div class="page-actions">

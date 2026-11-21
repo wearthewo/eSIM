@@ -36,13 +36,17 @@ _MASK = "**********"
 # Performance and limits (see README, "Size and speed"). Defaults are the product values;
 # the limits are raised only for local benchmarks (scripts/bench.py).
 DEFAULT_GENERATE_SLOTS = 1  # /generate jobs at once per process; 0.5 CPU gains nothing from 2
-DEFAULT_UPLOAD_CACHE_MB = 150  # checked rows kept between /validate and /generate (0 = off)
+# How long a /generate request waits for a free slot (queued behind running parts) before
+# it gets 503 + Retry-After.
+DEFAULT_GENERATE_WAIT_SECONDS = 60
+DEFAULT_UPLOAD_CACHE_MB = 100  # checked rows kept between /validate and /generate (0 = off)
 DEFAULT_UPLOAD_CACHE_TTL_MINUTES = 30  # after last use
 DEFAULT_MAX_ROWS = 10_000  # data rows per upload (app.core.parser.MAX_ROWS)
 DEFAULT_MAX_UPLOAD_MB = 5  # data file size (app.web.routes.MAX_UPLOAD_BYTES)
 # (name, minimum, maximum) of each integer setting
 _INT_BOUNDS: dict[str, tuple[int, int]] = {
     "GENERATE_SLOTS": (1, 16),
+    "GENERATE_WAIT_SECONDS": (1, 600),
     "UPLOAD_CACHE_MB": (0, 4096),
     "UPLOAD_CACHE_TTL_MINUTES": (1, 24 * 60),
     "MAX_ROWS": (1, 1_000_000),
@@ -116,6 +120,8 @@ class Settings:
     # Where users reach the app; the admin CLI builds invite and reset links from it.
     public_base_url: str = DEFAULT_PUBLIC_BASE_URL
     generate_slots: int = DEFAULT_GENERATE_SLOTS
+    # Whole seconds from the environment; a float so tests can use fractions.
+    generate_wait_seconds: float = DEFAULT_GENERATE_WAIT_SECONDS
     upload_cache_mb: int = DEFAULT_UPLOAD_CACHE_MB
     upload_cache_ttl_minutes: int = DEFAULT_UPLOAD_CACHE_TTL_MINUTES
     max_rows: int = DEFAULT_MAX_ROWS
@@ -215,6 +221,7 @@ def load_settings(environ: Mapping[str, str]) -> Settings:
         fingerprint_key=_secret(environ, "FINGERPRINT_KEY"),
         public_base_url=base_url or DEFAULT_PUBLIC_BASE_URL,
         generate_slots=_int(environ, "GENERATE_SLOTS", DEFAULT_GENERATE_SLOTS),
+        generate_wait_seconds=_int(environ, "GENERATE_WAIT_SECONDS", DEFAULT_GENERATE_WAIT_SECONDS),
         upload_cache_mb=_int(environ, "UPLOAD_CACHE_MB", DEFAULT_UPLOAD_CACHE_MB),
         upload_cache_ttl_minutes=_int(
             environ, "UPLOAD_CACHE_TTL_MINUTES", DEFAULT_UPLOAD_CACHE_TTL_MINUTES

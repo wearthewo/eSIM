@@ -1098,6 +1098,13 @@ def _set_slots(user: LoggedIn, slots: int) -> None:
     user.app.state.settings = dataclasses.replace(user.app.state.settings, generate_slots=slots)
 
 
+def _set_wait(user: LoggedIn, seconds: float) -> None:
+    """GENERATE_WAIT_SECONDS for this test's app (read by every /generate)."""
+    user.app.state.settings = dataclasses.replace(
+        user.app.state.settings, generate_wait_seconds=seconds
+    )
+
+
 def test_generate_slots_default_to_one(logged_in: LoggedIn) -> None:
     assert Settings().generate_slots == 1
     assert logged_in.app.state.settings.generate_slots == 1
@@ -1107,9 +1114,8 @@ def test_generate_slots_default_to_one(logged_in: LoggedIn) -> None:
 def test_generate_limited_to_concurrent_jobs(
     logged_in: LoggedIn, monkeypatch, fixture_bytes, slots: int
 ) -> None:
-    assert routes.JOB_WAIT_SECONDS == 5.0
     _set_slots(logged_in, slots)
-    monkeypatch.setattr(routes, "JOB_WAIT_SECONDS", 0.2)
+    _set_wait(logged_in, 0.2)
     gate = _Gate(routes._generate_part)
     monkeypatch.setattr(routes, "_generate_part", gate)
     data = fixture_bytes("valid_minimal.csv")
@@ -1150,7 +1156,7 @@ def test_generate_waits_for_a_free_slot(logged_in: LoggedIn, monkeypatch, fixtur
             waiting = asyncio.create_task(_post_generate(client, data, logged_in))
             await asyncio.sleep(0.3)
             assert not waiting.done() and gate.running == 2  # queued, not in the pipeline
-            gate.release.set()  # well within JOB_WAIT_SECONDS
+            gate.release.set()  # well within GENERATE_WAIT_SECONDS
             responses = await asyncio.gather(*jobs, waiting)
             assert [r.status_code for r in responses] == [200, 200, 200]
             assert responses[2].headers["content-type"] == "application/zip"
@@ -1159,8 +1165,60 @@ def test_generate_waits_for_a_free_slot(logged_in: LoggedIn, monkeypatch, fixtur
     asyncio.run(scenario())
 
 
+def test_generate_waits_sixty_seconds_by_default(
+    logged_in: LoggedIn, monkeypatch, fixture_bytes
+) -> None:
+    """GENERATE_WAIT_SECONDS (default 60) is the time a part queues for a slot."""
+    assert Settings().generate_wait_seconds == 60
+    assert logged_in.app.state.settings.generate_wait_seconds == 60
+    timeouts: list[float | None] = []
+    real_wait_for = asyncio.wait_for
+
+    async def spy(awaitable, timeout):
+        timeouts.append(timeout)
+        return await real_wait_for(awaitable, timeout)
+
+    monkeypatch.setattr(routes.asyncio, "wait_for", spy)
+    with BatchClient(logged_in) as client:
+        response = client.post(
+            "/generate", data=FORM, files=_csv_file("v.csv", fixture_bytes("valid_minimal.csv"))
+        )
+    assert response.status_code == 200
+    assert timeouts == [60]
+
+
+def test_second_users_part_queues_behind_a_running_part(
+    logged_in: LoggedIn, accts, monkeypatch, fixture_bytes
+) -> None:
+    """One slot: another organization's user's part waits for the running part to finish
+    and is then generated, instead of getting "Server busy"."""
+    _set_slots(logged_in, 1)
+    _set_wait(logged_in, 4)
+    other_id = accts.user("second@other.test")  # in an organization of its own
+    other = LoggedIn(logged_in.app, other_id, accts.session(other_id))
+    gate = _Gate(routes._generate_part)
+    monkeypatch.setattr(routes, "_generate_part", gate)
+    first_data = fixture_bytes("valid_minimal.csv")
+    second_data = fixture_bytes("valid_full.csv")
+
+    async def scenario() -> None:
+        async with _async_client(logged_in) as first_client, _async_client(other) as second:
+            running = asyncio.create_task(_post_generate(first_client, first_data, logged_in))
+            assert await gate.entered()
+            queued = asyncio.create_task(_post_generate(second, second_data, other))
+            await asyncio.sleep(1.0)
+            assert not queued.done() and gate.running == 1  # waiting for the slot
+            gate.release.set()
+            responses = await asyncio.gather(running, queued)
+            assert [r.status_code for r in responses] == [200, 200]
+            assert all(r.headers["content-type"] == "application/zip" for r in responses)
+            assert gate.peak == 1
+
+    asyncio.run(scenario())
+
+
 def test_job_slots_released_after_failures(logged_in: LoggedIn, monkeypatch, fixture_bytes) -> None:
-    monkeypatch.setattr(routes, "JOB_WAIT_SECONDS", 0.1)
+    _set_wait(logged_in, 0.1)
     real = routes._generate_part
     calls = {"n": 0}
 
