@@ -53,6 +53,9 @@ Tests pass, lint clean, only the requested module changed.
   branding, batches, HMAC fingerprints of codes, audit log, usage. NEVER activation codes,
   matching IDs, confirmation codes, uploaded files, PDFs, customer names or customer emails.
 - Fingerprints are HMAC-SHA256 with FINGERPRINT_KEY, never plain hashes.
+- Two-factor authentication (app/auth/mfa.py): TOTP secrets are stored only AES-GCM
+  encrypted with a subkey of MFA_KEY, recovery codes only as HMACs. Neither is ever
+  logged, and neither is shown again after enrolment. Superadmins must have 2FA on.
 - Secrets come from environment variables (.env locally), never from code or git.
 - app/core stays free of database and web imports.
 - Audit log keeps 90 days; access requests 30 days.

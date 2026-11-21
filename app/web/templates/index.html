@@ -140,10 +140,14 @@
     </div>
     <div>
       <h3>Privacy</h3>
-      <p class="notice">
-        Files are processed in memory and never stored. Nothing you upload is saved,
-        logged or kept after the response is sent. History keeps only the file name,
-        counts and keyed fingerprints that recognise codes already used.
+      <p class="notice" id="privacy-note">
+        Files are processed in memory and never stored: your file is never written to
+        disk, logged or saved in the database. While an order is downloading, its checked
+        rows are kept only in the server's memory (never on disk or in the database), so
+        the parts can be made without sending the file again. They are deleted as soon as
+        the order is complete, and at the latest {{ cache_minutes }} minutes after they
+        were last used. History keeps only the file name, counts and keyed fingerprints
+        that recognise codes already used.
       </p>
     </div>
   </div>

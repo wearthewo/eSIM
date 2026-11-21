@@ -16,11 +16,18 @@ built in memory by ``make_big_csv.make_csv``. Downloads are refused by the brows
 so no ZIP or PDF is written anywhere. The folder-mode shots (``upload-folder-*``) use
 an in-memory stand-in for the folder picker that drops every byte (headless Chromium
 cannot show the picker). Keys are random per run, never the .env ones.
+
+Two-factor authentication: the seeded superadmin has it on (with a random secret), so
+the admin shots use a direct session as before. A member with a known synthetic
+password and 2FA shows the second login step (``login-2fa*``); the owner sets 2FA up
+during the run (``account-2fa-*``, the code is computed from the key on the page); a
+second superadmin without 2FA shows the forced enrolment (``admin-2fa-required``).
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
 import secrets
 import socket
 import sys
@@ -45,7 +52,7 @@ from sqlalchemy.engine import make_url  # noqa: E402
 from sqlalchemy.orm import Session, sessionmaker  # noqa: E402
 
 from app import batches  # noqa: E402
-from app.auth import accounts  # noqa: E402
+from app.auth import accounts, mfa  # noqa: E402
 from app.auth.passwords import hash_password  # noqa: E402
 from app.core.pipeline import check_upload, part_count, part_records  # noqa: E402
 from app.db.base import Base  # noqa: E402
@@ -71,6 +78,9 @@ VIEWPORTS = {"desktop": (1440, 900), "phone": (390, 844)}
 ADMIN_EMAIL = "admin@platform.test"
 OWNER_EMAIL = "owner@demo-mobile.test"
 WRONG_PASSWORD = "not the password"  # noqa: S105  (synthetic, for the login error state)
+MFA_EMAIL = "secure@demo-mobile.test"
+MFA_PASSWORD = "synthetic screens passphrase"  # noqa: S105  (a synthetic test account)
+NEW_ADMIN_EMAIL = "new.admin@platform.test"
 MULTI_PART_ROWS = 1_200  # three parts of 500: shows the progress bar part-way
 CONTINUE_ROWS = 1_200  # the unfinished batch: part 1 of 3 downloaded
 
@@ -137,9 +147,12 @@ class Seeded:
     org_id: int
     admin_token: str
     owner_token: str
+    new_admin_token: str  # a superadmin without 2FA yet
 
 
-def seed(engine: Engine, sessions: sessionmaker[Session], key: bytes) -> Seeded:
+def seed(
+    engine: Engine, sessions: sessionmaker[Session], key: bytes, mfa_keys: mfa.MfaKeys
+) -> Seeded:
     """Empty the test database and add a small synthetic world."""
     tables = ", ".join(t.name for t in Base.metadata.sorted_tables)
     with engine.begin() as conn:
@@ -218,6 +231,21 @@ def seed(engine: Engine, sessions: sessionmaker[Session], key: bytes) -> Seeded:
             ]
         )
         db.flush()
+        secure = User(
+            email=MFA_EMAIL,
+            organization_id=org.id,
+            role=Role.MEMBER,
+            password_hash=hash_password(MFA_PASSWORD),
+            last_login_at=now - timedelta(days=1),
+        )
+        new_admin = User(
+            email=NEW_ADMIN_EMAIL, is_superadmin=True, role=Role.MEMBER, password_hash=unusable
+        )
+        db.add_all([secure, new_admin])
+        db.flush()
+        for with_mfa in (admin, secure):  # 2FA on, with a random secret nobody knows
+            with_mfa.mfa_secret = mfa.encrypt_secret(mfa_keys, with_mfa.id, mfa.new_secret())
+            with_mfa.mfa_enabled_at = now - timedelta(days=2)
         ops = db.scalars(select(User).where(User.email == "ops@demo-mobile.test")).one()
         # History: every status that is listed, in both organizations (metadata only).
         history = [
@@ -264,12 +292,14 @@ def seed(engine: Engine, sessions: sessionmaker[Session], key: bytes) -> Seeded:
         )
         batches.record_part(db, org.id, unfinished, 1, part_records(report, 1), key=key, now=now)
         db.flush()
-        org_id, admin_id, owner_id = org.id, admin.id, owner.id
+        org_id, admin_id, owner_id, new_admin_id = org.id, admin.id, owner.id, new_admin.id
     with sessions.begin() as db:
         admin_token = accounts.create_session(db, admin_id, now=now)
     with sessions.begin() as db:
         owner_token = accounts.create_session(db, owner_id, now=now)
-    return Seeded(org_id, admin_token, owner_token)
+    with sessions.begin() as db:
+        new_admin_token = accounts.create_session(db, new_admin_id, now=now)
+    return Seeded(org_id, admin_token, owner_token, new_admin_token)
 
 
 # --- Server --------------------------------------------------------------------------------
@@ -339,6 +369,18 @@ def anonymous_pages(p: Pass, page: Page) -> None:
     page.click("button[type=submit]")
     page.wait_for_selector("p.error")
     p.shot(page, "login-error")
+
+    if p.wants("login-2fa"):  # the second step: the code page, then a wrong code
+        page.goto(f"{p.base}/login")
+        page.fill("#email", MFA_EMAIL)
+        page.fill("#password", MFA_PASSWORD)
+        page.click("button[type=submit]")
+        page.wait_for_selector("#code")
+        p.shot(page, "login-2fa")
+        page.fill("#code", "000000")
+        page.click("button[type=submit]")
+        page.wait_for_selector("p.error")
+        p.shot(page, "login-2fa-error")
 
     page.goto(f"{p.base}/request-access")
     p.shot(page, "request-access")
@@ -436,6 +478,23 @@ def owner_pages(p: Pass, page: Page) -> None:
     page.goto(f"{p.base}/team")
     p.shot(page, "team")
     history_pages(p, page)
+    if p.wants("account"):
+        account_pages(p, page)
+
+
+def account_pages(p: Pass, page: Page) -> None:
+    """The owner sets up 2FA: QR code and key, the recovery codes, then the status."""
+    page.goto(f"{p.base}/account/2fa")
+    page.wait_for_selector("svg.qr-code")
+    p.shot(page, "account-2fa-setup")
+    key = page.inner_text("#text-key").replace(" ", "")
+    secret = base64.b32decode(key + "=" * (-len(key) % 8))
+    page.fill("#enable-code", mfa.code_at(secret, mfa.step_of(datetime.now(UTC))))
+    page.click("form[action='/account/2fa/enable'] button[type=submit]")
+    page.wait_for_selector("#recovery-codes")
+    p.shot(page, "account-2fa-recovery-codes")
+    page.goto(f"{p.base}/account/2fa")
+    p.shot(page, "account-2fa-on")
 
 
 def history_pages(p: Pass, page: Page) -> None:
@@ -492,14 +551,24 @@ def run_pass(browser_new_context: Callable[..., BrowserContext], p: Pass) -> Non
         "color_scheme": "dark" if p.dark else "light",
         "accept_downloads": False,  # nothing is saved to disk
     }
-    contexts = {who: browser_new_context(**options) for who in ("anon", "owner", "admin")}
+    who_all = ("anon", "owner", "admin", "new_admin")
+    contexts = {who: browser_new_context(**options) for who in who_all}
     try:
-        for who, token in (("owner", p.seeded.owner_token), ("admin", p.seeded.admin_token)):
+        for who, token in (
+            ("owner", p.seeded.owner_token),
+            ("admin", p.seeded.admin_token),
+            ("new_admin", p.seeded.new_admin_token),
+        ):
             contexts[who].add_cookies([{"name": SESSION_COOKIE, "value": token, "url": p.base}])
         anon = contexts["anon"].new_page()
         anonymous_pages(p, anon)
         owner_pages(p, contexts["owner"].new_page())
         admin_pages(p, contexts["admin"].new_page(), contexts["anon"].new_page())
+        if p.wants("admin-2fa-required"):  # a superadmin without 2FA, sent to set it up
+            forced = contexts["new_admin"].new_page()
+            forced.goto(f"{p.base}/admin/orgs")
+            forced.wait_for_selector(".mfa-required")
+            p.shot(forced, "admin-2fa-required")
     finally:
         for context in contexts.values():
             context.close()
@@ -518,13 +587,16 @@ def main() -> int:
     port = free_port()
     base = f"http://127.0.0.1:{port}"
     fingerprint_key = secrets.token_urlsafe(48).encode()
+    mfa_key = secrets.token_urlsafe(48)
     settings = Settings(
         env="development",
         database_url=Secret(engine.url.render_as_string(hide_password=False)),
         secret_key=Secret(secrets.token_urlsafe(48)),
         fingerprint_key=Secret(fingerprint_key.decode()),
+        mfa_key=Secret(mfa_key),
         public_base_url=base,
     )
+    mfa_keys = mfa.keys_from(mfa_key)
     server = start_server(settings, sessions, port)
     OUTPUT.mkdir(parents=True, exist_ok=True)
 
@@ -543,7 +615,7 @@ def main() -> int:
                             base=base,
                             viewport=viewport,
                             dark=dark,
-                            seeded=seed(engine, sessions, fingerprint_key),
+                            seeded=seed(engine, sessions, fingerprint_key, mfa_keys),
                             only=only,
                             generate=not opts.skip_generate and not dark,
                         ),

@@ -103,6 +103,28 @@ def test_entry_expires_after_ttl_since_last_use(cache: UploadCache, clock: Clock
     assert 7 not in cache and cache.nbytes == 0
 
 
+def test_purge_expired_deletes_without_a_lookup(cache: UploadCache, clock: Clock) -> None:
+    """The app's sweep: expired rows leave memory even if nobody asks for them again."""
+    cache.put(_entry(1))
+    clock.now += TTL / 2
+    cache.put(_entry(2))
+    clock.now += TTL / 2 + 1  # 1 has expired, 2 has not
+    assert cache.purge_expired() == 1
+    assert 1 not in cache and 2 in cache
+    assert cache.nbytes == _entry(2).nbytes
+    assert cache.purge_expired() == 0
+
+
+def test_purge_expired_within_a_margin(cache: UploadCache, clock: Clock) -> None:
+    """With ``within`` (the sweep interval) an entry that would expire before the next
+    sweep is deleted now, so none outlives the TTL."""
+    cache.put(_entry(1))
+    clock.now += TTL - 30  # expires in 30 s
+    assert cache.purge_expired(within=10) == 0
+    assert cache.purge_expired(within=60) == 1
+    assert 1 not in cache and cache.nbytes == 0
+
+
 def test_expired_entries_are_dropped_on_put(cache: UploadCache, clock: Clock) -> None:
     cache.put(_entry(1))
     clock.now += TTL + 1

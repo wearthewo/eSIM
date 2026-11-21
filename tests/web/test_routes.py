@@ -262,6 +262,38 @@ def test_index_renders(client: TestClient) -> None:
     assert 'id="download"' not in html  # only after a successful validation
 
 
+PRIVACY_NOTE_PARTS = (
+    "Files are processed in memory and never stored: your file is never written to disk, "
+    "logged or saved in the database.",
+    "While an order is downloading, its checked rows are kept only in the server's memory "
+    "(never on disk or in the database)",
+    "They are deleted as soon as the order is complete, and at the latest {minutes} minutes "
+    "after they were last used.",
+)
+
+
+def _privacy_note(html: str) -> str:
+    start = html.index('id="privacy-note"')
+    note = html[html.index(">", start) + 1 : html.index("</p>", start)]
+    return " ".join(note.split()).replace("&#39;", "'")
+
+
+def test_index_privacy_note_says_where_rows_are_kept(client: TestClient) -> None:
+    """The note matches the upload cache: memory only, deleted on completion or after
+    UPLOAD_CACHE_TTL_MINUTES (default 30) at the latest."""
+    note = _privacy_note(client.get("/").text)
+    for part in PRIVACY_NOTE_PARTS:
+        assert part.format(minutes=30) in note, part
+
+
+def test_index_privacy_note_follows_the_cache_setting(logged_in: LoggedIn) -> None:
+    app = logged_in.app
+    app.state.settings = dataclasses.replace(app.state.settings, upload_cache_ttl_minutes=45)
+    with logged_in.client() as c:
+        note = _privacy_note(c.get("/").text)
+    assert PRIVACY_NOTE_PARTS[2].format(minutes=45) in note
+
+
 def test_index_links_the_excel_template(client: TestClient) -> None:
     html = client.get("/").text
     assert '<a href="/template.xlsx" download>Download template (Excel)</a>' in html

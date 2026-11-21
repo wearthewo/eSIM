@@ -342,6 +342,16 @@ input:disabled, select:disabled, textarea:disabled { background: var(--surface-2
 }
 .page-header h1 { margin-bottom: var(--space-1); }
 .page-header .lead { color: var(--text-muted); max-width: 46rem; margin: 0; }
+/* Two-factor authentication (account_2fa.html, account_2fa_codes.html) */
+.mfa-steps { display: grid; gap: var(--space-4); padding-left: var(--space-5); margin: 0; }
+/* White behind the QR code in the dark scheme too: scanners need dark-on-light. */
+.qr-wrap { margin-top: var(--space-3); display: block; width: fit-content; padding: var(--space-2); background: #ffffff; border-radius: var(--radius-md); line-height: 0; }
+.qr-wrap svg { display: block; width: 205px; height: 205px; max-width: 100%; }
+.mfa-form .field { max-width: 20rem; }
+.mfa-steps .mfa-form { margin-top: var(--space-2); }
+.text-key { font-size: 1.05rem; letter-spacing: 0.08em; word-break: normal; overflow-wrap: normal; }
+.recovery-codes { list-style: none; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr)); gap: var(--space-2); }
+.recovery-codes code { font-size: 1.05rem; letter-spacing: 0.06em; }
 .page-header .today-usage { margin: var(--space-2) 0 0; font-weight: 600; font-variant-numeric: tabular-nums; }
 .page-actions { display: flex; gap: var(--space-2); flex-wrap: wrap; align-items: center; }
 .back-link {

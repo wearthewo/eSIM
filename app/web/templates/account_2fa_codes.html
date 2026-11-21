@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}Recovery codes · eSIM PDF generator{% endblock %}
+{% block content %}
+<section class="card auth-card wide">
+  {% if regenerated %}
+  <h1>New recovery codes</h1>
+  <p>Your old recovery codes no longer work. Save these somewhere safe, away from your
+    phone. If you lose your phone, sign in with one of them instead of a code from the app.
+    Each works once.</p>
+  {% else %}
+  <h1>Two-factor authentication is on</h1>
+  <p>Save these recovery codes somewhere safe, away from your phone. If you lose your phone,
+    sign in with one of them instead of a code from the app. Each works once.</p>
+  {% endif %}
+  <p class="alert alert-warning">This is the only time the codes are shown.</p>
+  <ul class="recovery-codes" id="recovery-codes">
+    {% for code in codes %}<li><code>{{ code }}</code></li>{% endfor %}
+  </ul>
+  <p><a class="btn btn-primary" href="{% if regenerated %}/account/2fa{% else %}/{% endif %}">Continue</a></p>
+</section>
+{% endblock %}

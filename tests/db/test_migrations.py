@@ -25,6 +25,7 @@ TABLES = {
     "code_fingerprints",
     "audit_log",
     "usage",
+    "mfa_recovery_codes",
 }
 
 # Column-name fragments that would mean storing data the database must never hold.

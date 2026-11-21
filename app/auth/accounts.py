@@ -125,6 +125,11 @@ def _organization_ok(db: Session, user: User) -> bool:
     return org is not None and not org.disabled
 
 
+def login_allowed(db: Session, user: User) -> bool:
+    """The user may log in: enabled, has a password, and the organization is enabled."""
+    return not user.disabled and user.password_hash is not None and _organization_ok(db, user)
+
+
 def _recent_failures(db: Session, since: dt.datetime, *conditions: ColumnElement[bool]) -> int:
     query = select(func.count(AuditLog.id)).where(
         AuditLog.action == LOGIN,
@@ -142,6 +147,9 @@ def attempt_login(
     db: Session, email: str, password: str, *, ip: IpPrefix | None, now: dt.datetime
 ) -> User | None:
     """The user if ``email`` and ``password`` are right and login is allowed, else ``None``.
+
+    For a user with two-factor authentication on, this is only the first step: the
+    caller must not create a session before ``app.auth.mfa.verify_login`` succeeds.
 
     Unknown emails, wrong passwords, disabled users or organizations, users without
     a password yet and rate-limited attempts all return ``None`` after the same
@@ -177,8 +185,9 @@ def attempt_login(
 
     if needs_rehash:
         user.password_hash = hash_password(password)
-    user.last_login_at = now
-    audit(db, LOGIN, AuditOutcome.SUCCESS, **who)
+    if user.mfa_enabled_at is None:  # with 2FA, set by the second step (app.auth.mfa)
+        user.last_login_at = now
+    audit(db, LOGIN, AuditOutcome.SUCCESS, **who)  # with 2FA: the password was right
     return user
 
 
@@ -196,6 +205,7 @@ class CurrentUser:
     is_superadmin: bool
     session_id: int
     csrf_token_hash: bytes
+    mfa_enabled: bool = False  # superadmins without it may only enrol (app.web.auth)
 
 
 def create_session(db: Session, user_id: int, *, now: dt.datetime) -> str:
@@ -256,6 +266,7 @@ def resolve_session(db: Session, token: str | None, *, now: dt.datetime) -> Curr
         is_superadmin=user.is_superadmin,
         session_id=session.id,
         csrf_token_hash=session.csrf_token_hash,
+        mfa_enabled=user.mfa_enabled_at is not None,
     )
 
 
@@ -331,6 +342,9 @@ def consume_link(
     db: Session, token: str, password_hash: str, *, ip: IpPrefix | None, now: dt.datetime
 ) -> LinkTarget | None:
     """Use the link once: set the password, end the user's other sessions, audit.
+
+    Two-factor authentication is never changed: a user who has it still needs the code
+    (``app.web.auth`` sends them to /login/2fa instead of making a session).
 
     Returns the target, or ``None`` if the link is invalid, used or expired (also
     when another request used it first: the ``UPDATE`` only matches unused links).

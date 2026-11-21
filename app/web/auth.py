@@ -6,6 +6,14 @@ Cookies (see ``cookie_name``):
   SameSite=Lax, Path=/. In production it is ``__Host-esim_session`` and Secure.
 - pre-auth: a random nonce for the login and set-password forms. SameSite=Strict,
   so another site's form post never carries it (login CSRF).
+- mfa: after a correct password, for users with two-factor authentication, the signed
+  state of the second step (``app.auth.tokens.sign_mfa_state``): user id and time, tied
+  to the pre-auth nonce, valid 5 minutes. No session exists until the code is right.
+  HttpOnly, SameSite=Strict.
+
+Two-factor authentication (``app.auth.mfa``): /login then /login/2fa (a 6-digit code or a
+recovery code). A superadmin without 2FA gets a session but may only reach
+/account/2fa* and /logout until it is on (``require_user`` redirects everything else).
 
 Development runs on plain ``http://127.0.0.1``, where browsers do not reliably
 keep ``Secure`` cookies (and a ``__Host-`` cookie must be Secure). So with
@@ -35,7 +43,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse, Response
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.auth import access, accounts
+from app.auth import access, accounts, mfa
 from app.auth.accounts import SESSION_ABSOLUTE_TTL, CurrentUser, LinkTarget
 from app.auth.passwords import (
     MAX_PASSWORD_CHARS,
@@ -45,13 +53,16 @@ from app.auth.passwords import (
 )
 from app.auth.tokens import (
     FORM_TOKEN_MAX_AGE_SECONDS,
+    MFA_STATE_MAX_AGE_SECONDS,
     check_form_token,
+    check_mfa_state,
     csrf_for,
     csrf_matches,
     digest,
     is_token_shaped,
     new_token,
     sign_form_token,
+    sign_mfa_state,
 )
 from app.db.ip import ip_prefix
 from app.db.models import AuditOutcome
@@ -60,10 +71,13 @@ from app.web.templating import templates
 
 SESSION_COOKIE = "esim_session"
 PREAUTH_COOKIE = "esim_preauth"
+MFA_COOKIE = "esim_mfa"
 CSRF_HEADER = "X-CSRF-Token"
 CSRF_FIELD = "csrf_token"
 FORM_TOKEN_FIELD = "form_token"  # noqa: S105  (a field name, not a secret)
 LOGIN_PATH = "/login"
+MFA_LOGIN_PATH = "/login/2fa"
+ENROLMENT_PATH = "/account/2fa"  # and below: what a superadmin without 2FA may reach
 SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 MAX_FORM_BYTES = 8 * 1024
 MAX_FORM_FIELDS = 10
@@ -71,6 +85,10 @@ MAX_FORM_FIELDS = 10
 MSG_LOGIN_FAILED = (
     "Email or password is incorrect. After too many failed attempts, sign-in pauses for 15 minutes."
 )
+MSG_MFA_WRONG = (
+    "The code is incorrect. After too many failed attempts, sign-in pauses for 15 minutes."
+)
+MSG_MFA_EXPIRED = "Your sign-in expired. Enter your email and password again."
 MSG_LINK_INVALID = (
     "This link is not valid. It may have been used already or have expired. "
     "Ask your administrator for a new link."
@@ -107,8 +125,19 @@ class FormTooLarge(AuthError):
     status_code = 413
 
 
+class MfaEnrolmentRequired(AuthError):
+    """A superadmin without two-factor authentication: only enrolment is allowed."""
+
+    status_code = 303
+
+
 async def handle_auth_error(request: Request, exc: Exception) -> Response:
-    """Not logged in: 303 to /login (htmx: 401 + HX-Redirect). Others: plain text."""
+    """Not logged in: 303 to /login (htmx: 401 + HX-Redirect). A superadmin without 2FA:
+    303 to /account/2fa (htmx: 401 + HX-Redirect). Others: plain text."""
+    if isinstance(exc, MfaEnrolmentRequired):
+        if request.headers.get("HX-Request") == "true":
+            return Response(status_code=401, headers={"HX-Redirect": ENROLMENT_PATH, **NO_STORE})
+        return RedirectResponse(ENROLMENT_PATH, status_code=303, headers=NO_STORE)
     if isinstance(exc, LoginRequired):
         if request.headers.get("HX-Request") == "true":
             response: Response = Response(
@@ -141,6 +170,17 @@ def _secret_key(request: Request) -> bytes:
     if key is None:  # create_app refuses to start without it
         raise RuntimeError("SECRET_KEY is not set")
     return key.reveal().encode("utf-8")
+
+
+def mfa_keys(request: Request) -> mfa.MfaKeys:
+    """The subkeys of ``MFA_KEY``, derived once per app."""
+    keys: mfa.MfaKeys | None = getattr(request.app.state, "mfa_keys", None)
+    if keys is None:
+        key = _settings(request).mfa_key
+        if key is None:  # create_app refuses to start without it
+            raise RuntimeError("MFA_KEY is not set")
+        keys = request.app.state.mfa_keys = mfa.keys_from(key.reveal())
+    return keys
 
 
 def utc_now() -> datetime:
@@ -253,11 +293,18 @@ def _resolve(sessions: sessionmaker[Session], token: str) -> tuple[CurrentUser |
         return user, pending
 
 
+def _enrolment_allowed(request: Request) -> bool:
+    """Paths a superadmin without two-factor authentication may still use."""
+    path = request.url.path
+    return path == "/logout" or path == ENROLMENT_PATH or path.startswith(ENROLMENT_PATH + "/")
+
+
 async def require_user(request: Request) -> CurrentUser:
     """The logged-in user; raises ``LoginRequired`` or (POST without CSRF token) ``CsrfFailed``.
 
     Sets ``request.state.user``, ``request.state.csrf_token`` and (superadmins)
-    ``request.state.pending_requests`` for the templates.
+    ``request.state.pending_requests`` for the templates. A superadmin without two-factor
+    authentication gets ``MfaEnrolmentRequired`` everywhere but /account/2fa and /logout.
     """
     settings = _settings(request)
     token = request.cookies.get(cookie_name(settings, SESSION_COOKIE))
@@ -275,6 +322,8 @@ async def require_user(request: Request) -> CurrentUser:
             submitted = (await read_small_form(request)).get(CSRF_FIELD)
         if not csrf_matches(submitted, user.csrf_token_hash):
             raise CsrfFailed
+    if user.is_superadmin and not user.mfa_enabled and not _enrolment_allowed(request):
+        raise MfaEnrolmentRequired
     request.state.user = user
     request.state.csrf_token = csrf_for(token)
     return user
@@ -370,12 +419,16 @@ def _login(
     password: str,
     old_token: str | None,
     ip: accounts.IpPrefix | None,
-) -> str | None:
+) -> str | int | None:
+    """A new session token; the user id when a two-factor code is needed first (no
+    session yet); ``None`` when the login failed."""
     with sessions.begin() as db:
         now = utc_now()
         user = accounts.attempt_login(db, email, password, ip=ip, now=now)
         if user is None:
             return None
+        if user.mfa_enabled_at is not None:
+            return user.id
         accounts.delete_session(db, old_token)  # a new session on every login
         return accounts.create_session(db, user.id, now=now)
 
@@ -385,7 +438,7 @@ async def login(request: Request) -> Response:
     form = await read_small_form(request)
     form_token = check_form(request, LOGIN_PURPOSE, form)
     old_token = request.cookies.get(cookie_name(_settings(request), SESSION_COOKIE))
-    session_token = await run_in_threadpool(
+    result = await run_in_threadpool(
         _login,
         sessions_of(request),
         form.get("email", ""),
@@ -393,9 +446,115 @@ async def login(request: Request) -> Response:
         old_token,
         client_ip_prefix(request),
     )
-    if session_token is None:
+    if result is None:
         return _login_page(request, error=MSG_LOGIN_FAILED, status_code=401, form_token=form_token)
-    return _logged_in_redirect(request, session_token)
+    if isinstance(result, int):
+        return _second_step_redirect(request, result)
+    return _logged_in_redirect(request, result)
+
+
+# --- /login/2fa: the second step for users with two-factor authentication ----------------
+
+MFA_PURPOSE = "login-2fa"
+
+
+def _second_step_redirect(request: Request, user_id: int) -> RedirectResponse:
+    """To /login/2fa with the signed state; the pre-auth cookie (checked by /login) stays."""
+    nonce = _preauth_nonce(request)
+    if nonce is None:  # check_form passed, so the cookie is there
+        raise CsrfFailed
+    response = RedirectResponse(MFA_LOGIN_PATH, status_code=303, headers=NO_STORE)
+    _set_cookie(
+        response,
+        _settings(request),
+        MFA_COOKIE,
+        sign_mfa_state(_secret_key(request), user_id, nonce),
+        max_age=MFA_STATE_MAX_AGE_SECONDS,
+        samesite="strict",
+    )
+    return response
+
+
+def _mfa_user_id(request: Request) -> int | None:
+    """The user id of this browser's valid second-step state, else ``None``."""
+    value = request.cookies.get(cookie_name(_settings(request), MFA_COOKIE))
+    return check_mfa_state(_secret_key(request), value, _preauth_nonce(request))
+
+
+def _sign_in_expired(request: Request) -> HTMLResponse:
+    """Back to the login form with a message; the state cookie is removed."""
+    response = _login_page(request, error=MSG_MFA_EXPIRED, status_code=401)
+    _clear_cookie(response, _settings(request), MFA_COOKIE)
+    return response
+
+
+def _second_step_page(
+    request: Request,
+    *,
+    error: str | None = None,
+    status_code: int = 200,
+    form_token: str | None = None,
+) -> HTMLResponse:
+    return form_page(
+        request,
+        "login_2fa.html",
+        MFA_PURPOSE,
+        {"error": error, "max_chars": mfa.MAX_CODE_CHARS},
+        status_code=status_code,
+        form_token=form_token,
+    )
+
+
+@router.get(MFA_LOGIN_PATH, response_class=HTMLResponse)
+async def second_step_form(request: Request) -> HTMLResponse:
+    if _mfa_user_id(request) is None:
+        return _sign_in_expired(request)
+    return _second_step_page(request)
+
+
+def _second_step(
+    sessions: sessionmaker[Session],
+    keys: mfa.MfaKeys,
+    user_id: int,
+    code: str,
+    old_token: str | None,
+    ip: accounts.IpPrefix | None,
+) -> tuple[mfa.Verdict, str | None]:
+    """The code's verdict and, when it is right, the new session's token."""
+    with sessions.begin() as db:
+        now = utc_now()
+        verdict = mfa.verify_login(db, user_id, code, keys, now=now, ip=ip)
+        if verdict not in (mfa.Verdict.OK, mfa.Verdict.RECOVERY):
+            return verdict, None
+        accounts.delete_session(db, old_token)
+        return verdict, accounts.create_session(db, user_id, now=now)
+
+
+@router.post(MFA_LOGIN_PATH, response_model=None)
+async def second_step(request: Request) -> Response:
+    form = await read_small_form(request)
+    form_token = check_form(request, MFA_PURPOSE, form)
+    user_id = _mfa_user_id(request)
+    if user_id is None:
+        return _sign_in_expired(request)
+    verdict, session_token = await run_in_threadpool(
+        _second_step,
+        sessions_of(request),
+        mfa_keys(request),
+        user_id,
+        form.get("code", ""),
+        request.cookies.get(cookie_name(_settings(request), SESSION_COOKIE)),
+        client_ip_prefix(request),
+    )
+    if verdict == mfa.Verdict.UNAVAILABLE:
+        return _sign_in_expired(request)
+    if session_token is None:
+        return _second_step_page(
+            request, error=MSG_MFA_WRONG, status_code=401, form_token=form_token
+        )
+    response = _logged_in_redirect(request, session_token)
+    _clear_cookie(response, _settings(request), MFA_COOKIE)
+    return response
 
 
 def _logout(
@@ -489,12 +648,18 @@ def _use_link(
     password_hash: str,
     old_token: str | None,
     ip: accounts.IpPrefix | None,
-) -> str | None:
+) -> str | int | None:
+    """Set the password from the link. Returns a new session token; the user id when the
+    user has two-factor authentication (a new password never changes 2FA, and no session
+    is made before the code: the caller sends them to /login/2fa); ``None`` when the link
+    is no longer usable."""
     with sessions.begin() as db:
         now = utc_now()
         target = accounts.consume_link(db, token, password_hash, ip=ip, now=now)
         if target is None:
             return None
+        if mfa.status(db, target.user_id).enabled:
+            return target.user_id
         accounts.delete_session(db, old_token)
         return accounts.create_session(db, target.user_id, now=now)
 
@@ -520,12 +685,14 @@ async def set_password(request: Request, token: str) -> Response:
 
     password_hash = await run_in_threadpool(hash_password, password)
     old_token = request.cookies.get(cookie_name(_settings(request), SESSION_COOKIE))
-    session_token = await run_in_threadpool(
+    result = await run_in_threadpool(
         _use_link, sessions_of(request), token, password_hash, old_token, client_ip_prefix(request)
     )
-    if session_token is None:
+    if result is None:
         return _invalid_link(request)
-    return _logged_in_redirect(request, session_token)
+    if isinstance(result, int):  # 2FA stays on: the code is still needed
+        return _second_step_redirect(request, result)
+    return _logged_in_redirect(request, result)
 
 
 # --- Logging --------------------------------------------------------------------------

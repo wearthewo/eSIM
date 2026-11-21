@@ -15,6 +15,11 @@ the database (an advisory lock plus the day's ``retention_purge`` audit row), so
 with several workers, restarts and deploys the purge still runs at most once per
 UTC day, and no request ever waits for it. A failure is logged by exception class
 only and retried at the next check.
+
+Upload cache: the lifespan also deletes expired entries of ``app.state.upload_cache``
+(checked rows, including activation codes) every ``CACHE_SWEEP_SECONDS``, including
+those that would expire before the next sweep, so no entry stays in memory longer than
+UPLOAD_CACHE_TTL_MINUTES after its last use, even when no request comes.
 """
 
 from __future__ import annotations
@@ -38,10 +43,11 @@ from app.auth import retention
 from app.db.engine import make_engine
 from app.settings import Settings, check_web_settings, get_settings
 from app.upload_cache import UploadCache
-from app.web import admin, auth, history, public, team
+from app.web import account, admin, auth, history, public, team
 from app.web.routes import router
 
 RETENTION_CHECK_SECONDS = 60 * 60
+CACHE_SWEEP_SECONDS = 60
 logger = logging.getLogger(__name__)
 
 STATIC_DIR: Path = Path(__file__).parent / "static"
@@ -124,19 +130,28 @@ async def _retention_loop(sessions: sessionmaker[Session]) -> None:
         await _check_retention(sessions)
 
 
+async def _sweep_upload_cache(cache: UploadCache) -> None:
+    """Delete expired upload cache entries every ``CACHE_SWEEP_SECONDS``."""
+    while True:
+        await asyncio.sleep(CACHE_SWEEP_SECONDS)
+        cache.purge_expired(within=CACHE_SWEEP_SECONDS)  # gone before the next sweep
+
+
 def _lifespan(
     sessions: sessionmaker[Session] | None, run_retention: bool
 ) -> Callable[[FastAPI], AbstractAsyncContextManager[None]]:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        task = None
-        if run_retention and sessions is not None:
+        retain = run_retention and sessions is not None
+        if retain:
             await _check_retention(sessions)  # at startup, before serving
-            task = asyncio.create_task(_retention_loop(sessions))
+        tasks = [asyncio.create_task(_sweep_upload_cache(app.state.upload_cache))]
+        if retain:
+            tasks.append(asyncio.create_task(_retention_loop(sessions)))
         try:
             yield
         finally:
-            if task is not None:
+            for task in tasks:
                 task.cancel()
                 with suppress(asyncio.CancelledError):
                     await task
@@ -180,6 +195,7 @@ def create_app(
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
     app.add_api_route("/healthz", healthz, methods=["GET"], response_model=None)
     app.include_router(auth.router)
+    app.include_router(account.router)
     app.include_router(public.router)
     app.include_router(admin.router)
     app.include_router(team.router)

@@ -3,6 +3,8 @@
 No table has a column for activation codes, matching IDs, confirmation codes,
 uploaded files, PDFs, customer names or customer emails. Codes are only ever
 stored as HMAC fingerprints (``code_fingerprints``, see ``app.db.fingerprints``).
+Two-factor secrets are stored only AES-GCM encrypted with MFA_KEY (``users.mfa_secret``)
+and recovery codes only as HMACs (``mfa_recovery_codes``), see ``app.auth.mfa``.
 A batch keeps the uploaded file's sanitized name (for the History page), never its content.
 
 Conventions:
@@ -164,13 +166,22 @@ class Organization(Base):
 
 
 class User(Base):
-    """A login. ``email`` is unique case-insensitively (``lower(email)`` index)."""
+    """A login. ``email`` is unique case-insensitively (``lower(email)`` index).
+
+    Two-factor authentication (``app.auth.mfa``): ``mfa_secret`` is the TOTP secret,
+    encrypted (never plaintext); ``mfa_enabled_at`` is set once the user confirmed a code
+    (NULL: 2FA is off, and a secret without it is an enrolment not confirmed yet);
+    ``mfa_last_step`` is the last accepted 30-second step, so a code cannot be used twice.
+    """
 
     __tablename__ = "users"
     __table_args__ = (
         CheckConstraint(
             "is_superadmin OR organization_id IS NOT NULL",
             name="organization_required_unless_superadmin",
+        ),
+        CheckConstraint(
+            "mfa_enabled_at IS NULL OR mfa_secret IS NOT NULL", name="mfa_enabled_needs_secret"
         ),
     )
 
@@ -185,9 +196,25 @@ class User(Base):
     disabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
     created_at: Mapped[dt.datetime] = _created_at()
     last_login_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    mfa_secret: Mapped[bytes | None] = mapped_column(LargeBinary)
+    mfa_enabled_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    mfa_last_step: Mapped[int | None] = mapped_column(BigInteger)
 
 
 Index("uq_users_email_lower", func.lower(User.email), unique=True)
+
+
+class MfaRecoveryCode(Base):
+    """A one-time recovery code for two-factor login: only its HMAC (``app.auth.mfa``)."""
+
+    __tablename__ = "mfa_recovery_codes"
+    __table_args__ = (_digest_check("code_hash"),)
+
+    id: Mapped[int] = _id()
+    user_id: Mapped[int] = _fk("users.id", "CASCADE", nullable=False, index=True)
+    code_hash: Mapped[bytes] = mapped_column(LargeBinary)
+    created_at: Mapped[dt.datetime] = _created_at()
+    used_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Invite(Base):

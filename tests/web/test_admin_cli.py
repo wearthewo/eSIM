@@ -87,7 +87,9 @@ def test_create_superadmin(cli, browser, accts: Accounts) -> None:
     assert accts.sql("SELECT is_superadmin, organization_id FROM users") == [(True, None)]
     c = browser()
     assert _use_link(c, _token(link)) == 303
-    assert c.get("/").status_code == 200
+    first_page = c.get("/")  # a superadmin must set up two-factor authentication first
+    assert first_page.status_code == 303 and first_page.headers["location"] == "/account/2fa"
+    assert c.get("/account/2fa").status_code == 200
 
     code, _, err = cli("create-superadmin", "--email", "ADMIN@org.test")
     assert code == 1 and "already exists" in err

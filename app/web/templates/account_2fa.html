@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% block title %}Two-factor authentication · eSIM PDF generator{% endblock %}
+{# The QR code is an inline SVG built by app/web/account.py (segno), passed as Markup. #}
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1>Two-factor authentication</h1>
+    <p class="lead">
+      After your password, sign-in also asks for a 6-digit code from an authenticator
+      app on your phone, such as Google Authenticator or Microsoft Authenticator.
+    </p>
+  </div>
+</div>
+{% if forced %}<p class="alert alert-warning mfa-required">Superadmins must use two-factor authentication. Set it up to continue.</p>{% endif %}
+{% if notice %}<p class="alert alert-info" role="status">{{ notice }}</p>{% endif %}
+{% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+
+{% if status.enabled %}
+<section class="card" aria-labelledby="mfa-on-title">
+  <h2 id="mfa-on-title">On <span class="badge badge-success">enabled</span></h2>
+  <p>Switched on {{ status.enabled_at | athens }} (Greek time).</p>
+  <p>Recovery codes left: <strong>{{ status.recovery_codes_left }}</strong> of 10.
+    {% if status.recovery_codes_left < 3 %}Running low: generate new ones below.{% endif %}</p>
+</section>
+
+<section class="card" aria-labelledby="mfa-regenerate-title">
+  <h2 id="mfa-regenerate-title">Generate new recovery codes</h2>
+  <p>Replaces all your recovery codes: the old ones stop working. The new codes are shown once.</p>
+  <form method="post" action="/account/2fa/recovery-codes" class="row-form mfa-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="field">
+      <label for="regenerate-code">Code from your app</label>
+      <input id="regenerate-code" type="text" name="{{ code_field }}" required autocomplete="one-time-code"
+             inputmode="numeric" spellcheck="false" maxlength="{{ max_chars }}">
+    </div>
+    <button type="submit" class="btn btn-primary">Generate new codes</button>
+  </form>
+</section>
+
+<section class="card" aria-labelledby="mfa-off-title">
+  <h2 id="mfa-off-title">Switch off</h2>
+  {% if can_disable %}
+  <form method="post" action="/account/2fa/disable" class="row-form mfa-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="field">
+      <label for="disable-code">Code from your app (or a recovery code)</label>
+      <input id="disable-code" type="text" name="{{ code_field }}" required autocomplete="one-time-code"
+             inputmode="numeric" spellcheck="false" maxlength="{{ max_chars }}">
+    </div>
+    <button type="submit" class="btn btn-danger">Switch off</button>
+  </form>
+  {% else %}
+  <p class="muted">Superadmins cannot switch two-factor authentication off.</p>
+  {% endif %}
+</section>
+{% else %}
+<section class="card mfa-setup" aria-labelledby="mfa-setup-title">
+  <h2 id="mfa-setup-title">Set up</h2>
+  <ol class="mfa-steps">
+    <li>In your authenticator app, add an account and scan this QR code.
+      <div class="qr-wrap">{{ qr_svg }}</div>
+    </li>
+    <li>Can't scan it? Enter this key instead (time-based):
+      <p><code class="text-key" id="text-key">{{ text_key }}</code></p>
+    </li>
+    <li>Enter the 6-digit code the app shows.
+      <form method="post" action="/account/2fa/enable" class="row-form mfa-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="field">
+          <label for="enable-code">Code</label>
+          <input id="enable-code" type="text" name="{{ code_field }}" required autocomplete="one-time-code"
+                 inputmode="numeric" spellcheck="false" maxlength="{{ max_chars }}">
+        </div>
+        <button type="submit" class="btn btn-primary">Switch on</button>
+      </form>
+    </li>
+  </ol>
+</section>
+{% endif %}
+{% endblock %}

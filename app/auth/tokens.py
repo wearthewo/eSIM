@@ -11,6 +11,11 @@ Pages without a session (login, set password) use a signed form token instead:
 ``<timestamp>.<nonce>.<mac>`` with an HMAC-SHA256 under ``SECRET_KEY`` over a
 purpose, the timestamp and a nonce. The nonce is also kept in a SameSite=Strict
 cookie and must match it, so a token fetched by another site is useless.
+
+Between the password and the two-factor code (``/login/2fa``) there is no session yet,
+only a signed state ``<user_id>.<timestamp>.<mac>`` (HMAC-SHA256 under ``SECRET_KEY`` over
+the user id, the timestamp and the pre-auth cookie's nonce). It is valid for
+``MFA_STATE_MAX_AGE_SECONDS`` and only together with that browser's pre-auth cookie.
 """
 
 from __future__ import annotations
@@ -25,8 +30,11 @@ import time
 TOKEN_BYTES = 32
 TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_-]{43}")  # 32 bytes, URL-safe base64, no padding
 FORM_TOKEN_MAX_AGE_SECONDS = 60 * 60
+MFA_STATE_MAX_AGE_SECONDS = 5 * 60
 _CSRF_TAG = b"esim-csrf-v1"
 _FORM_TAG = b"esim-form-v1"
+_MFA_TAG = b"esim-mfa-state-v1"
+_MFA_STATE = re.compile(r"([0-9]{1,19})\.([0-9]{1,12})\.([A-Za-z0-9_-]{43})")
 
 
 def new_token() -> str:
@@ -96,3 +104,45 @@ def check_form_token(
         return False
     age = (time.time() if now is None else now) - int(timestamp)
     return 0 <= age <= max_age
+
+
+def _mfa_mac(key: bytes, user_id: str, timestamp: str, nonce: str) -> str:
+    message = b"|".join((_MFA_TAG, user_id.encode(), timestamp.encode(), nonce.encode()))
+    return (
+        base64.urlsafe_b64encode(hmac.new(key, message, hashlib.sha256).digest())
+        .rstrip(b"=")
+        .decode("ascii")
+    )
+
+
+def sign_mfa_state(key: bytes, user_id: int, nonce: str, *, now: float | None = None) -> str:
+    """The pre-auth state for ``user_id`` after a correct password, tied to ``nonce``."""
+    timestamp = str(int(time.time() if now is None else now))
+    return f"{user_id}.{timestamp}.{_mfa_mac(key, str(user_id), timestamp, nonce)}"
+
+
+def check_mfa_state(
+    key: bytes,
+    value: str | None,
+    cookie_nonce: str | None,
+    *,
+    now: float | None = None,
+    max_age: int = MFA_STATE_MAX_AGE_SECONDS,
+) -> int | None:
+    """The user id of a valid, fresh state signed for this browser's nonce, else ``None``."""
+    if not value or not cookie_nonce:
+        return None
+    match = _MFA_STATE.fullmatch(value)
+    if match is None:
+        return None
+    user_id, timestamp, mac = match.groups()
+    try:
+        expected = _mfa_mac(key, user_id, timestamp, cookie_nonce)
+    except UnicodeEncodeError:  # lone surrogates in the cookie
+        return None
+    if not hmac.compare_digest(mac.encode(), expected.encode()):
+        return None
+    age = (time.time() if now is None else now) - int(timestamp)
+    if not 0 <= age <= max_age:
+        return None
+    return int(user_id)

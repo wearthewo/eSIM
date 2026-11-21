@@ -32,6 +32,7 @@
         <a class="nav-link"{% if path.startswith("/admin/orgs") %} aria-current="page"{% endif %} href="/admin/orgs">Admin</a>
         <a class="nav-link{% if pending_requests %} has-pending{% endif %}"{% if path.startswith("/admin/requests") %} aria-current="page"{% endif %} href="/admin/requests">Requests ({{ pending_requests }})</a>
         {% endif %}
+        <a class="nav-link"{% if path.startswith("/account/2fa") %} aria-current="page"{% endif %} href="/account/2fa">Two-factor</a>
       </nav>
       <div class="account">
         <span class="who" title="{{ current_user.email }}">{{ current_user.email }}</span>

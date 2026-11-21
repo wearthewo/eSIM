@@ -27,6 +27,7 @@ DB_URL = f"postgres://esim:{PASSWORD}@db.example.invalid:5432/esim"
 TEST_DB_URL = f"postgresql://esim:{PASSWORD}@db.example.invalid:5432/esim_test"
 SECRET_KEY = "s" * 40
 FINGERPRINT_KEY = "f" * 40
+MFA_KEY = "m" * 40
 
 
 def _prod(**overrides: str | None) -> dict[str, str]:
@@ -35,6 +36,7 @@ def _prod(**overrides: str | None) -> dict[str, str]:
         "DATABASE_URL": DB_URL,
         "SECRET_KEY": SECRET_KEY,
         "FINGERPRINT_KEY": FINGERPRINT_KEY,
+        "MFA_KEY": MFA_KEY,
         "PUBLIC_BASE_URL": "https://esim.example.invalid",
     }
     for name, value in overrides.items():
@@ -73,6 +75,9 @@ def test_valid_production_settings() -> None:
     assert settings.secret_key.reveal() == SECRET_KEY
     assert settings.fingerprint_key is not None
     assert settings.fingerprint_key.reveal() == FINGERPRINT_KEY
+    assert settings.mfa_key is not None
+    assert settings.mfa_key.reveal() == MFA_KEY
+    assert MFA_KEY not in repr(settings)
 
 
 def test_env_is_case_insensitive() -> None:
@@ -82,7 +87,7 @@ def test_env_is_case_insensitive() -> None:
 # --- production refuses weak secrets ------------------------------------------------
 
 
-@pytest.mark.parametrize("name", ["SECRET_KEY", "FINGERPRINT_KEY"])
+@pytest.mark.parametrize("name", ["SECRET_KEY", "FINGERPRINT_KEY", "MFA_KEY"])
 @pytest.mark.parametrize(
     ("value", "reason"),
     [
@@ -168,11 +173,13 @@ def test_web_app_needs_database_and_secret_key_in_every_env() -> None:
     assert "DATABASE_URL is missing" in str(info.value)
     assert "SECRET_KEY is missing" in str(info.value)
     assert "FINGERPRINT_KEY is missing" in str(info.value)
+    assert "MFA_KEY is missing" in str(info.value)
     with pytest.raises(SettingsError, match="FINGERPRINT_KEY is missing"):
         check_web_settings(load_settings({"DATABASE_URL": DB_URL, "SECRET_KEY": "dev-short"}))
-    check_web_settings(
-        load_settings({"DATABASE_URL": DB_URL, "SECRET_KEY": "dev-short", "FINGERPRINT_KEY": "x"})
-    )
+    dev = {"DATABASE_URL": DB_URL, "SECRET_KEY": "dev-short", "FINGERPRINT_KEY": "x"}
+    with pytest.raises(SettingsError, match="MFA_KEY is missing"):  # superadmins need 2FA
+        check_web_settings(load_settings(dev))
+    check_web_settings(load_settings({**dev, "MFA_KEY": "dev-mfa"}))
     check_web_settings(load_settings(_prod()))
 
 

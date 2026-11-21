@@ -150,9 +150,12 @@ def test_login_email_is_case_insensitive(anon: TestClient, accts: Accounts) -> N
 
 
 def test_superadmin_without_org_can_log_in(anon: TestClient, accts: Accounts) -> None:
-    accts.user("admin@org.test", superadmin=True)
+    """Without 2FA yet: a session, but only for enrolment (tests/web/test_mfa.py)."""
+    accts.user("admin@org.test", superadmin=True, mfa=False)
     assert _login(anon, email="admin@org.test").status_code == 303
-    assert anon.get("/").status_code == 200
+    first_page = anon.get("/")
+    assert first_page.status_code == 303 and first_page.headers["location"] == "/account/2fa"
+    assert anon.get("/account/2fa").status_code == 200
 
 
 def test_failures_look_identical(
@@ -413,7 +416,14 @@ def _routes(app: FastAPI) -> list:
 
 
 def test_every_app_route_is_protected_or_known_public(web_app: FastAPI) -> None:
-    public = {"/healthz", "/login", "/invite/{token}", "/request-access", "/static"}
+    public = {
+        "/healthz",
+        "/login",
+        "/login/2fa",
+        "/invite/{token}",
+        "/request-access",
+        "/static",
+    }
     checked = set()
     for route in _routes(web_app):
         if route.path in public:
@@ -433,6 +443,10 @@ def test_every_app_route_is_protected_or_known_public(web_app: FastAPI) -> None:
         "/logout",
         "/history",
         "/history/batches/{batch_id}/void",
+        "/account/2fa",
+        "/account/2fa/enable",
+        "/account/2fa/disable",
+        "/account/2fa/recovery-codes",
     }
     assert checked == core | MANAGEMENT_PATHS
 
@@ -455,7 +469,7 @@ def _post_routes(app: FastAPI) -> list[str]:
         route.path
         for route in _routes(app)
         if "POST" in (getattr(route, "methods", None) or set())
-        and route.path not in {"/login", "/invite/{token}", "/request-access"}
+        and route.path not in {"/login", "/login/2fa", "/invite/{token}", "/request-access"}
     )
 
 
@@ -465,6 +479,9 @@ def test_post_routes_are_known(web_app: FastAPI) -> None:
         "/logout",
         "/validate",
         "/history/batches/{batch_id}/void",
+        "/account/2fa/enable",
+        "/account/2fa/disable",
+        "/account/2fa/recovery-codes",
         *MANAGEMENT_POSTS,
     ]
     assert _post_routes(web_app) == sorted(expected)

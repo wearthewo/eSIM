@@ -8,11 +8,17 @@ Commands:
   reset-link --email X                              prints a one-time set-password link
   disable-user --email X                            also ends the user's sessions
   enable-user --email X
+  reset-2fa --email X                               switches two-factor authentication off
+                                                    and ends the user's sessions
   purge                                             deletes rows past retention; prints counts
 
 Links are ``PUBLIC_BASE_URL/invite/<token>`` and expire after 48 hours. Each link is
 printed once and only its SHA-256 is stored, so a lost link cannot be shown again:
 create a new one. Error messages never include tokens or the database URL.
+
+``reset-2fa`` is the break-glass for a user who lost both their phone and their recovery
+codes: two-factor authentication is switched off (a superadmin must set it up again at
+the next login, before reaching any other page) and an ``mfa_reset`` audit row is added.
 """
 
 from __future__ import annotations
@@ -27,7 +33,7 @@ from typing import TextIO
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app.auth import accounts, retention
+from app.auth import accounts, mfa, retention
 from app.auth.accounts import AdminError
 from app.db.models import Role
 from app.settings import Settings, SettingsError, get_settings
@@ -52,6 +58,10 @@ def _parser() -> argparse.ArgumentParser:
     cmd = commands.add_parser("disable-user", help="disable a user and end their sessions")
     cmd.add_argument("--email", required=True)
     cmd = commands.add_parser("enable-user", help="enable a user again")
+    cmd.add_argument("--email", required=True)
+    cmd = commands.add_parser(
+        "reset-2fa", help="switch two-factor authentication off; ends the user's sessions"
+    )
     cmd.add_argument("--email", required=True)
     commands.add_parser("purge", help="delete rows past their retention; prints counts")
     return parser
@@ -79,6 +89,9 @@ def _run(args: argparse.Namespace, db: Session, settings: Settings, now: datetim
         case "enable-user":
             accounts.set_user_disabled(db, args.email, False)
             return "enabled"
+        case "reset-2fa":
+            mfa.reset(db, args.email, now=now)
+            return "two-factor authentication switched off; their sessions have ended"
         case "purge":
             counts = retention.purge(db, now=now)
             return "\n".join(f"{table}: {n}" for table, n in counts.items())

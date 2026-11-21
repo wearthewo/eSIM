@@ -26,6 +26,15 @@ ZIP files (500 PDFs per part, up to 10,000 rows per upload).
   row is bold and frozen. Neither file ever holds activation codes, matching IDs
   or confirmation codes. The files are built in memory (never in a temporary
   file) with fixed timestamps, so the same input gives byte-identical ZIPs.
+- **What the server keeps**: the uploaded file is processed in memory and never
+  written to disk, logged or saved in the database. While an order is downloading, its
+  checked rows (activation codes included) are kept only in the server's memory,
+  never on disk or in the database, so each part can be made without sending the file
+  again. They are deleted as soon as the order is complete (or fails, or its batch is
+  voided), and at the latest `UPLOAD_CACHE_TTL_MINUTES` (default 30) minutes after they
+  were last used: a sweep every minute deletes them even when no request comes. If they
+  are gone (expired, the memory cap `UPLOAD_CACHE_MB` was reached, or the server
+  restarted), the page simply sends the file again for the next part.
 
 Project rules (strings for ICCID/IMSI/MSISDN, no secrets on disk or in logs, QR
 holds only the activation code, synthetic test data only) are in `CLAUDE.md`.
@@ -64,16 +73,20 @@ confirmation codes, uploaded files, PDFs, customer names or customer emails.
    TEST_DATABASE_URL=postgresql+psycopg://esim:change-me@localhost:5432/esim_test
    SECRET_KEY=dev-replace-with-a-long-random-value
    FINGERPRINT_KEY=dev-replace-with-a-long-random-value
+   MFA_KEY=dev-replace-with-a-long-random-value
    ```
 
    Generate real keys with
    `.venv\Scripts\python.exe -c "import secrets; print(secrets.token_urlsafe(48))"`.
    Real environment variables override `.env`, and `.env` is not read at all
-   when `ENV=production`. In production, `SECRET_KEY` and `FINGERPRINT_KEY` must
-   be at least 32 characters and must not start with `dev-`, or the settings
-   refuse to load. `postgres://` and `postgresql://` URLs (as Render provides
+   when `ENV=production`. In production, `SECRET_KEY`, `FINGERPRINT_KEY` and
+   `MFA_KEY` must be at least 32 characters and must not start with `dev-`, or the
+   settings refuse to load. The app refuses to start without `MFA_KEY` in every
+   environment, because superadmins cannot sign in without two-factor authentication. `postgres://` and `postgresql://` URLs (as Render provides
    them) are rewritten to `postgresql+psycopg://` automatically.
    Changing `FINGERPRINT_KEY` later makes every stored fingerprint useless.
+   Changing `MFA_KEY` later makes every stored two-factor secret and recovery code
+   useless: everyone with 2FA then needs `reset-2fa` (see "Signing in").
 
 3. Apply the migrations (they read `DATABASE_URL`; nothing is configured in
    `alembic.ini`):
@@ -111,6 +124,46 @@ Scripts (synthetic data only, output goes to the gitignored `output/`):
   uses random keys, never the `.env` ones. Downloads are refused, so no ZIP or PDF
   is saved. Options: `--only login,upload` (page-name prefixes), `--skip-generate`
   (no PDF generation, much faster), `--no-dark`.
+
+## Signing in
+
+Accounts are by invitation only. The invite (or a reset link from an administrator)
+sets the password. A new password never changes 2FA: someone with 2FA on who sets a
+password from a link still has to enter the code before they are signed in.
+
+1. Go to `/login` and enter your email and password.
+2. If two-factor authentication (2FA) is on for your account, the next page asks for
+   the 6-digit code from your authenticator app (Google Authenticator, Microsoft
+   Authenticator or any other TOTP app). The page is valid for 5 minutes; after that,
+   start again with your password. A code works once, and the code from just before
+   the current one is still accepted (for a slow phone clock or a slow typist).
+3. After too many wrong passwords, or 5 wrong codes, sign-in for the account pauses
+   for 15 minutes.
+
+**Setting up 2FA**: open **Two-factor** in the top bar (`/account/2fa`), scan the QR
+code with the app (or type in the key shown under it), and enter the code the app
+shows. Only then is 2FA on. The next page shows 10 recovery codes **once**: save them
+somewhere safe, away from the phone.
+
+- **Superadmins must use 2FA.** A superadmin without it is sent to `/account/2fa`
+  right after signing in and can reach no other page (except Log out) until it is on.
+  Superadmins cannot switch it off.
+- **Everyone else can switch it off** on the same page, with a current code from the
+  app or a recovery code.
+- **New recovery codes**: "Generate new recovery codes" on `/account/2fa` needs a
+  current code from the app (not a recovery code). It replaces all the old codes, which
+  stop working, and shows the new ones once.
+- **Lost the phone?** Sign in with a recovery code instead of the 6-digit code; each
+  recovery code works once.
+- **Lost the phone and the recovery codes?** The platform administrator runs
+  `.venv\Scripts\python.exe -m app.admin reset-2fa --email person@example.test`. It
+  switches 2FA off for that user and ends their sessions. A superadmin must then set up
+  2FA again at the next sign-in.
+
+The TOTP secret is stored only encrypted (AES-256-GCM, with a key derived from
+`MFA_KEY`), the recovery codes only as keyed hashes, and neither is ever logged.
+Successful and failed codes, recovery codes used, switching 2FA on or off, new
+recovery codes (`mfa_recovery_regenerated`) and `reset-2fa` are all in the audit log.
 
 ## Web UI
 

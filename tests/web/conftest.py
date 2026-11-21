@@ -31,6 +31,10 @@ PASSWORD = "correct horse battery staple"  # synthetic test password
 # Not example.invalid: route tests check that customer emails (example.invalid) never appear.
 EMAIL = "owner@org.test"
 TEST_SECRET_KEY = "test-secret-key-for-signing-forms-only-0123456789"
+TEST_MFA_KEY = "test-mfa-key-for-encrypting-totp-secrets-0123456789"
+# Stands in for an encrypted TOTP secret of superadmins made by ``Accounts.user``: 2FA
+# counts as on (so they are not sent to enrolment), but no code ever matches it.
+PLACEHOLDER_MFA_SECRET = b"not-a-real-encrypted-secret-placeholder"
 
 
 @pytest.fixture(scope="session")
@@ -41,6 +45,7 @@ def web_settings(db_engine: Engine) -> Settings:
         database_url=Secret(db_engine.url.render_as_string(hide_password=False)),
         secret_key=Secret(TEST_SECRET_KEY),
         fingerprint_key=Secret("test-fingerprint-key-0123456789abcdef"),
+        mfa_key=Secret(TEST_MFA_KEY),
         public_base_url="http://testserver",
     )
 
@@ -108,8 +113,15 @@ class Accounts:
         superadmin: bool = False,
         disabled: bool = False,
         password_hash: str | None | bool = True,
+        mfa: bool | None = None,
     ) -> int:
-        """``password_hash=True`` uses the hash of ``PASSWORD``; ``None`` means no password."""
+        """``password_hash=True`` uses the hash of ``PASSWORD``; ``None`` means no password.
+
+        ``mfa`` (default: on for superadmins, who must have it) marks two-factor
+        authentication as on with a placeholder secret that no code matches. Tests of
+        2FA itself enrol through /account/2fa instead (``mfa=False``)."""
+        if mfa is None:
+            mfa = superadmin
         if org_id is None and not superadmin:
             org_id = self.org()
         with self.sessions.begin() as db:
@@ -120,6 +132,8 @@ class Accounts:
                 is_superadmin=superadmin,
                 disabled=disabled,
                 password_hash=self.password_hash if password_hash is True else password_hash,
+                mfa_secret=PLACEHOLDER_MFA_SECRET if mfa else None,
+                mfa_enabled_at=now() if mfa else None,
             )
             db.add(user)
             db.flush()

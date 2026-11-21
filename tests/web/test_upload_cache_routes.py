@@ -10,6 +10,7 @@ from __future__ import annotations
 import dataclasses
 import io
 import logging
+import time
 import zipfile
 from collections.abc import Iterator
 
@@ -288,3 +289,30 @@ def test_no_activation_code_in_logs_or_repr(
     texts.append(repr(entry))
     for text in texts:
         assert "LPA:" not in text and "TEST-" not in text
+
+
+# --- The sweep: expired rows leave memory without any request --------------------------------
+
+
+def test_app_sweeps_expired_rows_without_a_request(web_app: FastAPI, monkeypatch) -> None:
+    """The lifespan deletes expired entries (and those expiring before the next sweep)
+    every CACHE_SWEEP_SECONDS, though nobody looks them up again."""
+    from app.web import main
+    from tests.test_upload_cache import Clock, _entry
+
+    clock = Clock()
+    cache = UploadCache(max_bytes=50 * 1024 * 1024, ttl_seconds=30 * 60, clock=clock)
+    web_app.state.upload_cache = cache
+    cache.put(_entry(1))
+    cache.put(_entry(2))
+    clock.now += 15 * 60
+    assert cache.get(_entry(2).organization_id, 2) is not None  # 2 is used again
+    clock.now += 15 * 60 + 1  # 1: idle past the TTL; 2: idle 15 minutes
+    monkeypatch.setattr(main, "CACHE_SWEEP_SECONDS", 0.05)
+
+    with TestClient(web_app):  # runs the lifespan
+        deadline = time.monotonic() + 5
+        while 1 in cache and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert 1 not in cache  # deleted by the sweep, no lookup needed
+        assert 2 in cache

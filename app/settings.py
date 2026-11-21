@@ -117,6 +117,8 @@ class Settings:
     test_database_url: Secret | None = None
     secret_key: Secret | None = None
     fingerprint_key: Secret | None = None
+    # Encrypts TOTP secrets and keys the recovery-code HMACs (app/auth/mfa.py).
+    mfa_key: Secret | None = None
     # Where users reach the app; the admin CLI builds invite and reset links from it.
     public_base_url: str = DEFAULT_PUBLIC_BASE_URL
     generate_slots: int = DEFAULT_GENERATE_SLOTS
@@ -219,6 +221,7 @@ def load_settings(environ: Mapping[str, str]) -> Settings:
         test_database_url=_url(environ, "TEST_DATABASE_URL"),
         secret_key=_secret(environ, "SECRET_KEY"),
         fingerprint_key=_secret(environ, "FINGERPRINT_KEY"),
+        mfa_key=_secret(environ, "MFA_KEY"),
         public_base_url=base_url or DEFAULT_PUBLIC_BASE_URL,
         generate_slots=_int(environ, "GENERATE_SLOTS", DEFAULT_GENERATE_SLOTS),
         generate_wait_seconds=_int(environ, "GENERATE_WAIT_SECONDS", DEFAULT_GENERATE_WAIT_SECONDS),
@@ -236,6 +239,7 @@ def load_settings(environ: Mapping[str, str]) -> Settings:
             for p in (
                 _secret_problem("SECRET_KEY", settings.secret_key),
                 _secret_problem("FINGERPRINT_KEY", settings.fingerprint_key),
+                _secret_problem("MFA_KEY", settings.mfa_key),
                 "DATABASE_URL is missing" if settings.database_url is None else None,
                 base_url_problem,
             )
@@ -248,7 +252,8 @@ def load_settings(environ: Mapping[str, str]) -> Settings:
 
 def check_web_settings(settings: Settings) -> None:
     """Raise ``SettingsError`` unless the web app can run: it needs the database, a
-    ``SECRET_KEY`` and a ``FINGERPRINT_KEY`` (the duplicate check) in every environment
+    ``SECRET_KEY``, a ``FINGERPRINT_KEY`` (the duplicate check) and an ``MFA_KEY``
+    (two-factor authentication, required for superadmins) in every environment
     (production strength is checked by ``load_settings``)."""
     problems = [
         p
@@ -256,6 +261,7 @@ def check_web_settings(settings: Settings) -> None:
             "DATABASE_URL is missing" if settings.database_url is None else None,
             "SECRET_KEY is missing" if settings.secret_key is None else None,
             "FINGERPRINT_KEY is missing" if settings.fingerprint_key is None else None,
+            "MFA_KEY is missing" if settings.mfa_key is None else None,
         )
         if p is not None
     ]

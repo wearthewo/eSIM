@@ -64,7 +64,11 @@ from app.core.models import Branding, EsimRecord, ParseError, ValidationReport
 from app.core.parser import MAX_ROWS, SUPPORTED_EXTENSIONS, ParsedUpload
 from app.core.pipeline import PartError, check_upload
 from app.db.models import Batch, BatchStatus
-from app.settings import DEFAULT_GENERATE_SLOTS, DEFAULT_GENERATE_WAIT_SECONDS
+from app.settings import (
+    DEFAULT_GENERATE_SLOTS,
+    DEFAULT_GENERATE_WAIT_SECONDS,
+    DEFAULT_UPLOAD_CACHE_TTL_MINUTES,
+)
 from app.upload_cache import CachedUpload, UploadCache
 from app.web.auth import client_ip_prefix, require_user, sessions_of, utc_now
 from app.web.templating import templates
@@ -1009,13 +1013,27 @@ def today_usage(sessions: sessionmaker[Session], organization_id: int) -> DailyU
         return batches.daily_usage(db, organization_id, now=utc_now())
 
 
+def upload_cache_minutes(request: Request) -> int:
+    """``Settings.upload_cache_ttl_minutes`` (UPLOAD_CACHE_TTL_MINUTES): how long checked
+    rows stay in memory after their last use. The upload page's privacy note shows it."""
+    settings = getattr(request.app.state, "settings", None)
+    if settings is None:
+        return DEFAULT_UPLOAD_CACHE_TTL_MINUTES
+    return settings.upload_cache_ttl_minutes
+
+
 def _page(
     request: Request, form_values: dict[str, str], status_code: int = 200, **extra: Any
 ) -> HTMLResponse:
     return templates.TemplateResponse(
         request,
         "index.html",
-        _context(limits_of(request), form=form_values, **extra),
+        _context(
+            limits_of(request),
+            form=form_values,
+            cache_minutes=upload_cache_minutes(request),
+            **extra,
+        ),
         status_code=status_code,
         headers=_rejection_headers(status_code),
     )

@@ -31,6 +31,9 @@ dependencies = [
     "psycopg[binary]>=3.3,<3.4",
     "argon2-cffi>=25.1,<25.2",
     "python-dotenv>=1.2,<1.3",
+    # Two-factor authentication: AES-256-GCM for the stored TOTP secrets, HKDF for the
+    # subkeys of MFA_KEY (app/auth/mfa.py). TOTP itself is stdlib hmac.
+    "cryptography>=50,<51",
 ]
 
 [project.optional-dependencies]

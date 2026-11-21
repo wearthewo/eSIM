@@ -12,7 +12,9 @@ live only in this structure:
 - ``repr``/``str`` of the cache and its entries show ids and counts only;
 - an entry expires ``ttl_seconds`` after its last use, is evicted least-recently-used
   when the cache passes ``max_bytes``, and is discarded when its batch is completed,
-  failed or voided.
+  failed or voided. ``purge_expired``, which the app runs every minute, deletes entries
+  that have expired or would before the next run, so none stays longer than
+  ``ttl_seconds`` after its last use, even when no request comes.
 
 A miss (expired, evicted, server restarted, another worker process) is not an error:
 the page sends the file again for that part and the server fills the cache again.
@@ -149,6 +151,16 @@ class UploadCache:
             self._bytes += entry.nbytes
             self._evict(now)
             return True
+
+    def purge_expired(self, *, within: float = 0) -> int:
+        """Delete every entry that has expired, or will within ``within`` seconds; returns
+        how many. The app calls this every ``CACHE_SWEEP_SECONDS`` with ``within`` set to
+        that interval (``app.web.main``), so no entry stays in memory longer than
+        ``ttl_seconds`` after its last use, even when no request comes."""
+        with self._lock:
+            before = len(self._entries)
+            self._evict(self._clock() + max(0.0, within))
+            return before - len(self._entries)
 
     def discard(self, batch_id: int) -> None:
         """Forget the batch's rows (completed, failed or voided). No-op if absent."""
