@@ -125,6 +125,99 @@ Scripts (synthetic data only, output goes to the gitignored `output/`):
   is saved. Options: `--only login,upload` (page-name prefixes), `--skip-generate`
   (no PDF generation, much faster), `--no-dark`.
 
+## Deploy to Render
+
+`render.yaml` is a Render Blueprint. It creates:
+
+- a PostgreSQL 18 database `esim-db`, free for the first month, reachable only from
+  Render's private network;
+- a web service `esim` (Starter, Python 3.14.10) in Frankfurt.
+
+Every start of the service runs `alembic upgrade head`, then
+`python -m app.admin bootstrap`, then uvicorn: one worker, with the proxy headers
+trusted so that rate limits see real client IPs. Render's health check is `/healthz`,
+which needs no database and no login. In production the app refuses to start if a key,
+`DATABASE_URL` or an `https://` `PUBLIC_BASE_URL` is missing. It also sends HSTS and
+uses `__Host-` Secure cookies.
+
+1. **Create the Blueprint.** Push the repo to GitHub. In the Render Dashboard choose
+   **New > Blueprint**, connect the repository and pick the branch. Render reads
+   `render.yaml` and lists `esim-db` and `esim`.
+2. **Fill in the prompted values.** Render asks for the variables marked `sync: false`:
+   - `PUBLIC_BASE_URL`: the service's `.onrender.com` address, for example
+     `https://esim.onrender.com`. If that name is taken, Render adds a suffix. Check
+     the real address at the top of the service page once it exists. If it differs,
+     correct the variable under **Environment** (this redeploys). The app does not start
+     without an `https://` value.
+   - `BOOTSTRAP_SUPERADMIN_EMAIL`: your email address.
+   - `RESEND_API_KEY`, `EMAIL_FROM`, `ADMIN_NOTIFY_EMAIL`: leave them empty for now
+     (step 11).
+3. **Deploy.** Click **Apply** and wait for the first deploy to go live.
+4. **Copy the link from the logs.** Open the service's **Logs** and search for
+   `BOOTSTRAP:`. That line holds the one-time set-password link. It works once and
+   expires after 48 hours. Until it is used, treat it like a password.
+   - Later starts print nothing, because a superadmin then exists.
+   - If you lose the link or it expires, open the service's **Shell** and run
+     `python -m app.admin reset-link --email you@example.com` for a new one.
+   - If the host in the link is wrong (step 2), keep the `/invite/<token>` part and
+     open it on the right address.
+5. **Set your password** on the page the link opens.
+6. **Turn on two-factor authentication.** You are taken straight to `/account/2fa`
+   and can reach no other page until 2FA is on. Scan the QR code with an
+   authenticator app and enter the code. Store the 10 recovery codes in your password
+   manager, not on the phone (see "Signing in").
+7. **Remove `BOOTSTRAP_SUPERADMIN_EMAIL`** under **Environment** and save. Left in
+   place it does nothing while a superadmin exists. But if the service were ever pointed
+   at an empty database, it would create a superadmin again and print a link to the
+   logs.
+8. **Save the keys.** Under **Environment**, reveal `SECRET_KEY`, `FINGERPRINT_KEY` and
+   `MFA_KEY`. Render generated them as random 256-bit values when it created the
+   Blueprint. Copy all three into your password manager. They are not in git, and a new
+   Blueprint generates different ones.
+   - **`MFA_KEY` lost or changed**: every stored 2FA secret and recovery code becomes
+     unreadable, so nobody with 2FA can sign in, you included. If you have the old
+     value, put it back. Otherwise set a new value, run
+     `python -m app.admin reset-2fa --email ...` in **Shell** for every user with 2FA
+     (starting with yourself), and everyone sets 2FA up again.
+   - **`FINGERPRINT_KEY` lost or changed**: the duplicate check stops recognising
+     every code already used in the last 12 months, so the same eSIM could be issued
+     twice. This cannot be repaired, because the codes themselves are never stored.
+     Only the old value helps.
+   - **`SECRET_KEY`**: it only signs short-lived form tokens (1 hour) and the
+     5-minute step between password and 2FA code. Changing it makes sign-in forms that
+     are open at that moment fail once; sessions stay valid. If it leaks, change it.
+9. **Add the custom domain `app.esimsheet.com`.**
+   - In Render: service **Settings > Custom Domains > Add**, enter `app.esimsheet.com`.
+   - In Cloudflare: zone `esimsheet.com`, **DNS > Add record**. Type `CNAME`, name
+     `app`, target the service's `.onrender.com` host (without `https://`), proxy
+     status **DNS only** (grey cloud).
+   - Back in Render, click **Verify** and wait until the certificate is issued.
+   - Stay on DNS only. Proxying through Cloudflare adds a second proxy in front of
+     Render, which changes the client IPs the rate limits see. Don't turn it on without
+     checking that.
+10. **Update `PUBLIC_BASE_URL`** to `https://app.esimsheet.com` under **Environment**
+    (this redeploys). Invite and reset links then use the new domain. Links already
+    issued with the `.onrender.com` host keep working.
+11. **Later, when the email feature exists**, set:
+    - `EMAIL_BACKEND` = `resend`
+    - `RESEND_API_KEY` = a production API key
+    - `EMAIL_FROM` = `eSIM Sheet <no-reply@mail.esimsheet.com>`, once
+      `mail.esimsheet.com` is verified in Resend
+    - `ADMIN_NOTIFY_EMAIL`
+
+    Until then the app does not read these variables. `EMAIL_BACKEND=none` is only a
+    placeholder.
+12. **Upgrade the database before day 30.** A free Render database expires 30 days
+    after it was created, and 14 days after that it is deleted with all its data. It
+    also has no backups. Before day 30, change `plan: free` to `plan: 0.1c-256mb` (or
+    larger) in `render.yaml` and push, so the Blueprint syncs. You can also change the
+    instance type of `esim-db` in the Dashboard. The data and the connection string stay
+    the same.
+
+Admin commands on Render run in the service's **Shell** as `python -m app.admin ...`
+(no `.venv` path). The daily retention purge runs inside the app, so no cron job is
+needed.
+
 ## Signing in
 
 Accounts are by invitation only. The invite (or a reset link from an administrator)

@@ -5,8 +5,10 @@ All secrets and passwords here are synthetic.
 
 from __future__ import annotations
 
+import base64
 import pickle
 import re
+import secrets
 
 import pytest
 
@@ -119,6 +121,27 @@ def test_production_reports_every_problem_at_once() -> None:
 
 def test_exactly_32_characters_is_enough() -> None:
     assert load_settings(_prod(SECRET_KEY="x" * 32)).secret_key == Secret("x" * 32)
+
+
+def test_render_generated_keys_pass_the_production_checks() -> None:
+    """render.yaml uses ``generateValue: true`` for the three keys: Render sets each to a
+    random 256-bit value, base64-encoded (44 characters, alphabet ``A-Za-z0-9+/=``), so
+    it is long enough and can never start with ``dev-`` (``-`` is not base64)."""
+    for _ in range(50):
+        keys = {
+            name: base64.b64encode(secrets.token_bytes(32)).decode("ascii")
+            for name in ("SECRET_KEY", "FINGERPRINT_KEY", "MFA_KEY")
+        }
+        assert {len(v) for v in keys.values()} == {44}
+        settings = load_settings(_prod(**keys))
+        assert settings.mfa_key == Secret(keys["MFA_KEY"])
+
+
+def test_bootstrap_superadmin_email_is_read_and_blank_is_unset() -> None:
+    assert load_settings({}).bootstrap_superadmin_email is None
+    assert load_settings({"BOOTSTRAP_SUPERADMIN_EMAIL": "  "}).bootstrap_superadmin_email is None
+    settings = load_settings(_prod(BOOTSTRAP_SUPERADMIN_EMAIL=" first.admin@org.test "))
+    assert settings.bootstrap_superadmin_email == "first.admin@org.test"
 
 
 def test_production_errors_never_contain_the_database_password() -> None:

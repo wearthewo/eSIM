@@ -1,0 +1,76 @@
+# Render Blueprint: https://render.com/docs/blueprint-spec
+# Step-by-step deploy instructions: README.md, "Deploy to Render".
+#
+# region, databaseName, user and postgresMajorVersion cannot be changed after creation.
+# The database and the web service must share a region (private network).
+
+databases:
+  - name: esim-db
+    # FREE FOR THE FIRST MONTH ONLY. A free Render Postgres database expires 30 days after
+    # it is created; 14 days after that it is deleted with all its data. It also has no
+    # backups. Upgrade BEFORE DAY 30: change the line below to `plan: 0.1c-256mb` (the
+    # smallest paid instance; or a larger one) and let the Blueprint sync, or pick the
+    # instance type for esim-db in the Dashboard. The data and connection string stay.
+    plan: free
+    region: frankfurt
+    databaseName: esim
+    user: esim
+    postgresMajorVersion: "18"
+    # Private network only: no connections from the internet. To connect from your own
+    # machine (psql), add your IP as `- source: 203.0.113.7/32` with a description.
+    ipAllowList: []
+
+services:
+  - type: web
+    name: esim
+    runtime: python
+    plan: starter # 0.5 CPU, 512 MB, always on, Render Shell for `python -m app.admin`
+    region: frankfurt
+    buildCommand: pip install .
+    # Migrate, create the first superadmin if BOOTSTRAP_SUPERADMIN_EMAIL is set (prints a
+    # one-time link to the logs), then serve. One worker: the upload cache and the
+    # generation slots are per process. --proxy-headers/--forwarded-allow-ips: without
+    # them every user gets Render's proxy IP (one shared rate-limit prefix).
+    startCommand: >-
+      python -m alembic upgrade head &&
+      python -m app.admin bootstrap &&
+      uvicorn app.web.main:app --host 0.0.0.0 --port $PORT --workers 1
+      --proxy-headers --forwarded-allow-ips '*'
+    healthCheckPath: /healthz
+    envVars:
+      - key: PYTHON_VERSION # must be a full version; .python-version says 3.14
+        value: 3.14.10
+      - key: ENV
+        value: production
+      - key: DATABASE_URL # postgresql://...; app/settings.py switches it to psycopg 3
+        fromDatabase:
+          name: esim-db
+          property: connectionString
+      # Random 256-bit values, base64 (44 characters), made once when the Blueprint is
+      # created. Copy them into a password manager: losing MFA_KEY or FINGERPRINT_KEY
+      # cannot be undone (README, "Deploy to Render").
+      - key: SECRET_KEY
+        generateValue: true
+      - key: FINGERPRINT_KEY
+        generateValue: true
+      - key: MFA_KEY
+        generateValue: true
+      # Asked for when the Blueprint is created; later changes are made in the Dashboard.
+      - key: PUBLIC_BASE_URL # first https://<service>.onrender.com, later the custom domain
+        sync: false
+      - key: BOOTSTRAP_SUPERADMIN_EMAIL # remove after the first login
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: EMAIL_FROM
+        sync: false
+      - key: ADMIN_NOTIFY_EMAIL
+        sync: false
+      - key: EMAIL_BACKEND # "none" until the email feature exists; then "resend"
+        value: none
+      - key: GENERATE_SLOTS
+        value: "1"
+      - key: UPLOAD_CACHE_MB
+        value: "100"
+      - key: GENERATE_WAIT_SECONDS
+        value: "60"

@@ -11,6 +11,14 @@ Commands:
   reset-2fa --email X                               switches two-factor authentication off
                                                     and ends the user's sessions
   purge                                             deletes rows past retention; prints counts
+  bootstrap                                         creates the superadmin named by
+                                                    BOOTSTRAP_SUPERADMIN_EMAIL if none exists
+
+``bootstrap`` runs on every start of the deployed app (render.yaml). If the variable is
+set and there is no superadmin yet, it creates one and prints a single line starting with
+``BOOTSTRAP_LABEL`` and ending with the one-time set-password link. Otherwise it prints
+nothing and exits 0. The new superadmin must set up two-factor authentication at the
+first login, before reaching any other page.
 
 Links are ``PUBLIC_BASE_URL/invite/<token>`` and expire after 48 hours. Each link is
 printed once and only its SHA-256 is stored, so a lost link cannot be shown again:
@@ -27,7 +35,7 @@ import argparse
 import sys
 from collections.abc import Callable, Sequence
 from contextlib import AbstractContextManager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TextIO
 
 from sqlalchemy.exc import SQLAlchemyError
@@ -39,6 +47,11 @@ from app.db.models import Role
 from app.settings import Settings, SettingsError, get_settings
 
 SessionScope = Callable[[], AbstractContextManager[Session]]
+
+BOOTSTRAP_LABEL = (
+    "BOOTSTRAP: one-time superadmin set-password link "
+    f"(expires in {accounts.LINK_TTL // timedelta(hours=1)} h):"
+)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -64,6 +77,9 @@ def _parser() -> argparse.ArgumentParser:
     )
     cmd.add_argument("--email", required=True)
     commands.add_parser("purge", help="delete rows past their retention; prints counts")
+    commands.add_parser(
+        "bootstrap", help="create the BOOTSTRAP_SUPERADMIN_EMAIL superadmin if none exists"
+    )
     return parser
 
 
@@ -95,6 +111,9 @@ def _run(args: argparse.Namespace, db: Session, settings: Settings, now: datetim
         case "purge":
             counts = retention.purge(db, now=now)
             return "\n".join(f"{table}: {n}" for table, n in counts.items())
+        case "bootstrap":
+            token = accounts.bootstrap_superadmin(db, settings.bootstrap_superadmin_email, now=now)
+            return "" if token is None else f"{BOOTSTRAP_LABEL} {link(settings, token)}"
     raise AdminError("unknown command")  # argparse rejects it first
 
 
@@ -122,7 +141,8 @@ def main(
         # The engine hides bound parameters; show only the error class.
         err.write(f"error: database error ({type(exc).__name__})\n")
         return 1
-    out.write(f"{output}\n")
+    if output:  # ``bootstrap`` with nothing to do prints nothing at all
+        out.write(f"{output}\n")
     return 0
 
 

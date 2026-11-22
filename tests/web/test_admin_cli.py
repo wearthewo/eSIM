@@ -5,6 +5,7 @@ All data is synthetic.
 
 from __future__ import annotations
 
+import dataclasses
 import io
 import re
 from collections.abc import Callable
@@ -93,6 +94,80 @@ def test_create_superadmin(cli, browser, accts: Accounts) -> None:
 
     code, _, err = cli("create-superadmin", "--email", "ADMIN@org.test")
     assert code == 1 and "already exists" in err
+
+
+# --- bootstrap (runs on every start of the deployed app) -----------------------------------
+
+BOOTSTRAP_EMAIL = "first.admin@org.test"
+
+
+@pytest.fixture
+def bootstrap(
+    accts: Accounts, web_settings: Settings, web_sessions: sessionmaker[Session]
+) -> Callable[[str | None], tuple[int, str, str]]:
+    """``bootstrap(email)``: ``python -m app.admin bootstrap`` with
+    BOOTSTRAP_SUPERADMIN_EMAIL set to ``email`` (``None``: unset)."""
+
+    def _run(email: str | None) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        settings = dataclasses.replace(web_settings, bootstrap_superadmin_email=email)
+        code = admin.main(
+            ["bootstrap"], session_scope=web_sessions.begin, settings=settings, out=out, err=err
+        )
+        return code, out.getvalue(), err.getvalue()
+
+    return _run
+
+
+def test_bootstrap_without_email_does_nothing(bootstrap, accts: Accounts) -> None:
+    assert bootstrap(None) == (0, "", "")
+    assert accts.sql("SELECT count(*) FROM users") == [(0,)]
+
+
+def test_bootstrap_creates_the_superadmin_once(bootstrap, browser, accts: Accounts) -> None:
+    code, out, err = bootstrap(BOOTSTRAP_EMAIL.upper())
+    assert code == 0 and err == ""
+    lines = out.splitlines()
+    assert len(lines) == 1 and out.endswith("\n")
+    label = "BOOTSTRAP: one-time superadmin set-password link (expires in 48 h): "
+    assert lines[0].startswith(label)
+    token = _token(lines[0].removeprefix(label))
+    assert accts.sql("SELECT email, is_superadmin, organization_id, password_hash FROM users") == [
+        (BOOTSTRAP_EMAIL, True, None, None)
+    ]
+
+    # Every later start: nothing printed, nothing created, the first link still works.
+    assert bootstrap(BOOTSTRAP_EMAIL) == (0, "", "")
+    assert bootstrap("someone.else@org.test") == (0, "", "")
+    assert accts.sql("SELECT count(*) FROM users") == [(1,)]
+
+    c = browser()
+    assert _use_link(c, token) == 303
+    first_page = c.get("/")  # two-factor authentication must be set up first
+    assert first_page.status_code == 303 and first_page.headers["location"] == "/account/2fa"
+    assert bootstrap(BOOTSTRAP_EMAIL) == (0, "", "")
+
+
+def test_bootstrap_skips_when_another_superadmin_exists(bootstrap, accts: Accounts) -> None:
+    accts.user("existing.admin@org.test", superadmin=True)
+    assert bootstrap(BOOTSTRAP_EMAIL) == (0, "", "")
+    assert accts.sql("SELECT email FROM users") == [("existing.admin@org.test",)]
+
+
+@pytest.mark.parametrize(
+    ("email", "message"),
+    [("not-an-email", "not a valid email"), (EMAIL, "already exists")],
+    ids=["invalid", "organization-user"],
+)
+def test_bootstrap_errors_stop_the_start(
+    bootstrap, accts: Accounts, email: str, message: str
+) -> None:
+    accts.user()  # EMAIL, an organization owner
+    code, out, err = bootstrap(email)
+    assert code == 1 and out == ""
+    assert err.startswith("error: ") and message in err
+    assert email not in err
+    assert accts.sql("SELECT count(*) FROM users WHERE is_superadmin") == [(0,)]
 
 
 def test_reset_link(cli, browser, accts: Accounts) -> None:

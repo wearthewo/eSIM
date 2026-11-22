@@ -2,7 +2,8 @@
 
 Debug mode is off and unhandled errors return a generic 500 page, so error
 responses never expose tracebacks or row data. Request bodies are never
-logged. Every response carries the security headers in ``SECURITY_HEADERS``.
+logged. Every response carries the security headers in ``SECURITY_HEADERS``; in
+production also ``Strict-Transport-Security`` (``HSTS_HEADERS``).
 
 Settings come from ``get_settings()`` unless passed in (tests pass their own).
 Bad settings raise ``SettingsError``, so the app refuses to start. ``app`` (for
@@ -72,16 +73,27 @@ SECURITY_HEADERS: dict[str, str] = {
     "Referrer-Policy": "no-referrer",
     "X-Frame-Options": "DENY",
 }
+# Production only: development runs on plain http://127.0.0.1. Two years, no preload.
+HSTS_HEADERS: dict[str, str] = {
+    "Strict-Transport-Security": "max-age=63072000; includeSubDomains",
+}
+
+
+def security_headers(settings: Settings) -> dict[str, str]:
+    """``SECURITY_HEADERS``, plus ``HSTS_HEADERS`` in production."""
+    return SECURITY_HEADERS | HSTS_HEADERS if settings.is_production else dict(SECURITY_HEADERS)
 
 
 class SecurityHeadersMiddleware:
-    """Pure ASGI middleware that adds ``SECURITY_HEADERS`` to every HTTP response.
+    """Pure ASGI middleware that adds ``headers`` (default ``SECURITY_HEADERS``) to every
+    HTTP response.
 
     It does not touch the request body, so uploads keep streaming to the route.
     """
 
-    def __init__(self, app: ASGIApp) -> None:
+    def __init__(self, app: ASGIApp, headers: dict[str, str] | None = None) -> None:
         self.app = app
+        self.headers = SECURITY_HEADERS if headers is None else headers
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -91,7 +103,7 @@ class SecurityHeadersMiddleware:
         async def send_with_headers(message: Message) -> None:
             if message["type"] == "http.response.start":
                 headers = MutableHeaders(scope=message)
-                for name, value in SECURITY_HEADERS.items():
+                for name, value in self.headers.items():
                     headers[name] = value
             await send(message)
 
@@ -104,7 +116,8 @@ async def _generic_error(request: Request, exc: Exception) -> PlainTextResponse:
     Starlette sends this from outside the middleware stack, so the security
     headers are set here as well.
     """
-    return PlainTextResponse("Internal Server Error", status_code=500, headers=SECURITY_HEADERS)
+    headers = security_headers(request.app.state.settings)
+    return PlainTextResponse("Internal Server Error", status_code=500, headers=headers)
 
 
 async def healthz() -> PlainTextResponse:
@@ -191,7 +204,7 @@ def create_app(
     )
     app.add_exception_handler(Exception, _generic_error)
     app.add_exception_handler(auth.AuthError, auth.handle_auth_error)
-    app.add_middleware(SecurityHeadersMiddleware)
+    app.add_middleware(SecurityHeadersMiddleware, headers=security_headers(settings))
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
     app.add_api_route("/healthz", healthz, methods=["GET"], response_model=None)
     app.include_router(auth.router)

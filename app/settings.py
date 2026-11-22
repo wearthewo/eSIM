@@ -121,6 +121,8 @@ class Settings:
     mfa_key: Secret | None = None
     # Where users reach the app; the admin CLI builds invite and reset links from it.
     public_base_url: str = DEFAULT_PUBLIC_BASE_URL
+    # ``python -m app.admin bootstrap`` creates this superadmin if none exists (deploys).
+    bootstrap_superadmin_email: str | None = None
     generate_slots: int = DEFAULT_GENERATE_SLOTS
     # Whole seconds from the environment; a float so tests can use fractions.
     generate_wait_seconds: float = DEFAULT_GENERATE_WAIT_SECONDS
@@ -223,6 +225,7 @@ def load_settings(environ: Mapping[str, str]) -> Settings:
         fingerprint_key=_secret(environ, "FINGERPRINT_KEY"),
         mfa_key=_secret(environ, "MFA_KEY"),
         public_base_url=base_url or DEFAULT_PUBLIC_BASE_URL,
+        bootstrap_superadmin_email=_optional(environ, "BOOTSTRAP_SUPERADMIN_EMAIL"),
         generate_slots=_int(environ, "GENERATE_SLOTS", DEFAULT_GENERATE_SLOTS),
         generate_wait_seconds=_int(environ, "GENERATE_WAIT_SECONDS", DEFAULT_GENERATE_WAIT_SECONDS),
         upload_cache_mb=_int(environ, "UPLOAD_CACHE_MB", DEFAULT_UPLOAD_CACHE_MB),

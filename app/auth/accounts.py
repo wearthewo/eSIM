@@ -411,6 +411,20 @@ def create_superadmin(db: Session, email: str, *, now: dt.datetime) -> str:
     return new_password_token(db, user.id, now)
 
 
+def bootstrap_superadmin(db: Session, email: str | None, *, now: dt.datetime) -> str | None:
+    """Create the first superadmin at deploy time; returns its set-password token.
+
+    ``None`` (nothing done) when ``email`` is unset or any superadmin exists already, so
+    it is safe to run on every start. An invalid email, or one that belongs to another
+    user, raises ``AdminError`` like ``create_superadmin``.
+    """
+    if email is None:
+        return None
+    if db.scalar(select(User.id).where(User.is_superadmin).limit(1)) is not None:
+        return None
+    return create_superadmin(db, email, now=now)
+
+
 def invite(
     db: Session,
     organization_id: int,
