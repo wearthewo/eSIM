@@ -8,21 +8,28 @@
   email already registered) the answer is the same thank-you page, so the form never
   reveals who has an account. Only plain input mistakes are shown to the submitter.
 - Nothing about the submission is logged.
+- With email on and ``ADMIN_NOTIFY_EMAIL`` set, a stored request (not a honeypot,
+  rate-limited or duplicate one) is announced to that address in a background task
+  after the response: company name and volume band only.
 """
 
 from __future__ import annotations
 
 import unicodedata
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, FastAPI, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, Response
 from sqlalchemy.orm import Session, sessionmaker
+from starlette.background import BackgroundTask
 
+from app import emails
 from app.auth import access, accounts
 from app.auth.access import RequestFields
 from app.auth.accounts import AdminError, IpPrefix
 from app.db.models import MAX_EMAIL_CHARS, MAX_NAME_CHARS, MAX_NOTE_CHARS, VolumeBand
+from app.mail import AuditContext, deliver
+from app.settings import Settings
 from app.web.auth import (
     NO_STORE,
     check_form,
@@ -130,9 +137,24 @@ def _thank_you(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(request, "request_access_done.html", {}, headers=NO_STORE)
 
 
-def _submit(sessions: sessionmaker[Session], fields: RequestFields, ip: IpPrefix | None) -> None:
+def _submit(sessions: sessionmaker[Session], fields: RequestFields, ip: IpPrefix | None) -> bool:
+    """Store the request (committed on return); True if it was stored."""
     with sessions.begin() as db:
-        access.submit_request(db, fields, ip=ip, now=utc_now())
+        return access.submit_request(db, fields, ip=ip, now=utc_now())
+
+
+def _notify_admin(app: FastAPI, to: str, fields: RequestFields, ip: IpPrefix | None) -> None:
+    """Background task (after the response): tell ADMIN_NOTIFY_EMAIL (``to``) about the
+    request, with the company name and volume band only (no contact name, email or note)."""
+    settings: Settings = app.state.settings
+    message = emails.access_request(
+        to,
+        company_name=fields.company_name,
+        volume_label=VOLUME_LABELS[fields.volume_band],
+        review_url=f"{settings.public_base_url}/admin/requests",
+        base_url=settings.public_base_url,
+    )
+    deliver(app.state.mailer, message, sessions=app.state.sessionmaker, audit=AuditContext(ip=ip))
 
 
 @router.get(REQUEST_ACCESS_PATH, response_class=HTMLResponse)
@@ -151,5 +173,11 @@ async def request_access(request: Request) -> Response:
     except FieldError as exc:
         values = {name: form.get(name, "") for name in FIELDS}
         return _form(request, values, error=str(exc), status_code=400, form_token=form_token)
-    await run_in_threadpool(_submit, sessions_of(request), fields, client_ip_prefix(request))
-    return _thank_you(request)
+    ip = client_ip_prefix(request)
+    stored = await run_in_threadpool(_submit, sessions_of(request), fields, ip)
+    response = _thank_you(request)
+    settings: Settings = request.app.state.settings
+    to = settings.admin_notify_email
+    if stored and request.app.state.mailer is not None and to is not None:
+        response.background = BackgroundTask(_notify_admin, request.app, to, fields, ip)
+    return response

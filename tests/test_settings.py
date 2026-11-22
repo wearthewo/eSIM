@@ -137,6 +137,83 @@ def test_render_generated_keys_pass_the_production_checks() -> None:
         assert settings.mfa_key == Secret(keys["MFA_KEY"])
 
 
+RESEND_KEY = "re_synthetic_test_key_0123456789abcdef"
+SENDER = "eSIM Sheet <no-reply@mail.example.invalid>"
+
+
+def test_email_is_off_by_default() -> None:
+    assert load_settings({}).email_backend == "none"
+    assert not load_settings(_prod()).email_enabled
+
+
+def test_resend_settings_are_read() -> None:
+    settings = load_settings(
+        _prod(
+            EMAIL_BACKEND="Resend",
+            RESEND_API_KEY=RESEND_KEY,
+            EMAIL_FROM=SENDER,
+            ADMIN_NOTIFY_EMAIL="admin.notify@org.test",
+        )
+    )
+    assert settings.email_enabled and settings.email_backend == "resend"
+    assert settings.resend_api_key == Secret(RESEND_KEY)
+    assert settings.email_from == SENDER
+    assert settings.admin_notify_email == "admin.notify@org.test"
+    assert RESEND_KEY not in repr(settings)
+    bare = load_settings({"EMAIL_BACKEND": "resend", "RESEND_API_KEY": "k", "EMAIL_FROM": "a@b.co"})
+    assert bare.email_from == "a@b.co" and bare.admin_notify_email is None
+    assert bare.email_reply_to is None
+
+
+@pytest.mark.parametrize(
+    "value", ["support@esimsheet.example", "eSIM Sheet Support <support@esimsheet.example>"]
+)
+def test_email_reply_to_is_read(value: str) -> None:
+    settings = load_settings(_prod(EMAIL_REPLY_TO=f" {value} "))
+    assert settings.email_reply_to == value
+    assert load_settings({"EMAIL_REPLY_TO": "  "}).email_reply_to is None
+
+
+@pytest.mark.parametrize("production", [True, False], ids=["production", "development"])
+@pytest.mark.parametrize("missing", ["RESEND_API_KEY", "EMAIL_FROM"])
+def test_resend_needs_key_and_sender(production: bool, missing: str) -> None:
+    env = {"EMAIL_BACKEND": "resend", "RESEND_API_KEY": RESEND_KEY, "EMAIL_FROM": SENDER}
+    del env[missing]
+    with pytest.raises(SettingsError) as info:
+        load_settings(_prod(**env) if production else env)
+    message = str(info.value)
+    assert f"{missing} is missing (EMAIL_BACKEND is resend)" in message
+    if production:
+        assert message.startswith("Refusing to start in production")
+    assert RESEND_KEY not in message
+
+
+def test_unknown_email_backend_is_refused() -> None:
+    with pytest.raises(SettingsError, match="EMAIL_BACKEND must be one of none, resend"):
+        load_settings({"EMAIL_BACKEND": "smtp"})
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("EMAIL_FROM", "not an address"),
+        ("EMAIL_FROM", 'Name "quoted" <a@b.co>'),
+        ("EMAIL_FROM", "Name <a@b.co>\nBcc: x@y.co"),
+        ("EMAIL_FROM", "Name <a@b>"),
+        ("EMAIL_REPLY_TO", "support at example"),
+        ("EMAIL_REPLY_TO", "Support <support@example.invalid>\r\nBcc: x@y.co"),
+        ("EMAIL_REPLY_TO", 'Support "team" <support@example.invalid>'),
+        ("ADMIN_NOTIFY_EMAIL", "nobody"),
+        ("ADMIN_NOTIFY_EMAIL", "Name <a@b.co>"),
+    ],
+)
+def test_malformed_addresses_are_refused(name: str, value: str) -> None:
+    with pytest.raises(SettingsError) as info:
+        load_settings({name: value})
+    assert name in str(info.value)
+    assert value not in str(info.value)
+
+
 def test_bootstrap_superadmin_email_is_read_and_blank_is_unset() -> None:
     assert load_settings({}).bootstrap_superadmin_email is None
     assert load_settings({"BOOTSTRAP_SUPERADMIN_EMAIL": "  "}).bootstrap_superadmin_email is None

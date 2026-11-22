@@ -66,7 +66,13 @@ services:
         sync: false
       - key: ADMIN_NOTIFY_EMAIL
         sync: false
-      - key: EMAIL_BACKEND # "none" until the email feature exists; then "resend"
+      - key: EMAIL_REPLY_TO # optional, e.g. support@esimsheet.com: where replies go
+        sync: false
+      # "none": links are only shown on the page. To turn email on, set RESEND_API_KEY and
+      # EMAIL_FROM in the Dashboard first, then change this to "resend" here and push
+      # (a Dashboard change to this value would be undone by the next Blueprint sync).
+      # README, "Email".
+      - key: EMAIL_BACKEND
         value: none
       - key: GENERATE_SLOTS
         value: "1"

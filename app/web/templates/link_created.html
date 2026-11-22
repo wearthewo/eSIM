@@ -4,7 +4,17 @@
 <a class="back-link" href="{{ back_url }}">{{ back_label }}</a>
 <section class="card auth-card wide">
   <h1>{{ heading }}</h1>
+  {% if sent is none %}
   <p>Send this link to <strong>{{ email }}</strong>. It works once and expires in 48 hours.</p>
+  {% elif sent %}
+  {# One <span>: .alert is a flex container, so loose text and <strong> would become separate flex items with a gap before the full stop. #}
+  <p class="alert alert-success" role="status"><span>{% if kind == "invite" %}Invitation sent to{% else %}Reset link sent to{% endif %} <strong>{{ email }}</strong>.</span></p>
+  <p class="muted">Didn't get it? Check your spam or junk folder.</p>
+  <p>The link works once and expires in 48 hours. You can also copy it and send it yourself:</p>
+  {% else %}
+  <p class="alert alert-warning" role="alert">We couldn't send the email; copy this link instead.</p>
+  <p>Send this link to <strong>{{ email }}</strong>. It works once and expires in 48 hours.</p>
+  {% endif %}
   <p class="alert alert-warning">This is the only time the link is shown. If it is lost, create a new one.</p>
   <p class="copy-row">
     <input id="one-time-link" class="link-field" type="text" value="{{ link }}" readonly aria-label="One-time link">

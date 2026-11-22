@@ -84,13 +84,17 @@ async def invite_member(request: Request, owner: Owner) -> Response:
         )
     except AdminError as exc:
         return await _team_page(request, owner, error=str(exc), status_code=400)
-    return link_page(
+    return await link_page(
         request,
+        kind="invite",
         heading="Invite link",
         email=email.strip().lower(),
         token=token,
         back_url=TEAM_PATH,
         back_label="Back to the team",
+        actor_id=owner.user_id,
+        organization_id=owner.organization_id,
+        role=Role.MEMBER,
     )
 
 
@@ -114,13 +118,16 @@ async def _user_route(
     if result is None:
         raise not_found()
     if result.token is not None:
-        return link_page(
+        return await link_page(
             request,
+            kind="reset",
             heading="Password reset link",
             email=result.email,
             token=result.token,
             back_url=TEAM_PATH,
             back_label="Back to the team",
+            actor_id=owner.user_id,
+            organization_id=result.organization_id,
         )
     return redirect(TEAM_PATH)
 

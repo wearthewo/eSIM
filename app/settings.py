@@ -12,6 +12,7 @@ they are used (the engine, the HMAC key).
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import lru_cache
@@ -32,6 +33,15 @@ DRIVER_SCHEME = "postgresql+psycopg://"
 _REWRITE_SCHEMES = ("postgresql://", "postgres://")
 DEFAULT_PUBLIC_BASE_URL = "http://127.0.0.1:8000"
 _MASK = "**********"
+
+# Email (app/mail.py). "none": no email at all, links are only shown on the page.
+EmailBackend = Literal["none", "resend"]
+EMAIL_BACKENDS: tuple[EmailBackend, ...] = ("none", "resend")
+_ADDRESS = r"[^\s@<>\"(),;:]+@[^\s@<>\"(),;:]+\.[^\s@<>\"(),;:.]+"
+_ADDRESS_RE = re.compile(_ADDRESS)
+# "addr@domain" or "Display Name <addr@domain>" (no quotes, angle brackets or newlines in
+# the name).
+_SENDER_RE = re.compile(rf"(?:[^<>\"\r\n]+ )?<{_ADDRESS}>|{_ADDRESS}")
 
 # Performance and limits (see README, "Size and speed"). Defaults are the product values;
 # the limits are raised only for local benchmarks (scripts/bench.py).
@@ -130,10 +140,20 @@ class Settings:
     upload_cache_ttl_minutes: int = DEFAULT_UPLOAD_CACHE_TTL_MINUTES
     max_rows: int = DEFAULT_MAX_ROWS
     max_upload_mb: int = DEFAULT_MAX_UPLOAD_MB
+    # Email (app/mail.py): with "resend", the API key and the sender are required.
+    email_backend: EmailBackend = "none"
+    resend_api_key: Secret | None = None
+    email_from: str | None = None  # "eSIM Sheet <no-reply@mail.esimsheet.com>"
+    email_reply_to: str | None = None  # optional "support@esimsheet.com": replies go there
+    admin_notify_email: str | None = None  # new access requests; optional
 
     @property
     def is_production(self) -> bool:
         return self.env == "production"
+
+    @property
+    def email_enabled(self) -> bool:
+        return self.email_backend != "none"
 
     @property
     def cookie_secure(self) -> bool:
@@ -200,6 +220,25 @@ def _base_url_problem(value: str | None, *, production: bool) -> str | None:
     return None
 
 
+def _email_problems(settings: Settings) -> list[str]:
+    """What is wrong with the email settings (names only, never values)."""
+    problems = []
+    if settings.email_from is not None and not _SENDER_RE.fullmatch(settings.email_from):
+        problems.append('EMAIL_FROM must be "Name <address>" or an address')
+    reply_to = settings.email_reply_to
+    if reply_to is not None and not _SENDER_RE.fullmatch(reply_to):
+        problems.append('EMAIL_REPLY_TO must be "Name <address>" or an address')
+    notify = settings.admin_notify_email
+    if notify is not None and not _ADDRESS_RE.fullmatch(notify):
+        problems.append("ADMIN_NOTIFY_EMAIL must be an email address")
+    if settings.email_backend == "resend":
+        if settings.resend_api_key is None:
+            problems.append("RESEND_API_KEY is missing (EMAIL_BACKEND is resend)")
+        if settings.email_from is None:
+            problems.append("EMAIL_FROM is missing (EMAIL_BACKEND is resend)")
+    return problems
+
+
 def load_settings(environ: Mapping[str, str]) -> Settings:
     """Build ``Settings`` from ``environ``. Raises ``SettingsError`` if they are unusable.
 
@@ -216,6 +255,9 @@ def load_settings(environ: Mapping[str, str]) -> Settings:
     base_url_problem = _base_url_problem(base_url, production=production)
     if base_url_problem is not None and not production:
         raise SettingsError(base_url_problem)
+    email_backend = (_optional(environ, "EMAIL_BACKEND") or "none").lower()
+    if email_backend not in EMAIL_BACKENDS:
+        raise SettingsError(f"EMAIL_BACKEND must be one of {', '.join(EMAIL_BACKENDS)}")
 
     settings = Settings(
         env=env,  # type: ignore[arg-type]  # checked against ENVS above
@@ -234,7 +276,15 @@ def load_settings(environ: Mapping[str, str]) -> Settings:
         ),
         max_rows=_int(environ, "MAX_ROWS", DEFAULT_MAX_ROWS),
         max_upload_mb=_int(environ, "MAX_UPLOAD_MB", DEFAULT_MAX_UPLOAD_MB),
+        email_backend=email_backend,  # type: ignore[arg-type]  # checked above
+        resend_api_key=_secret(environ, "RESEND_API_KEY"),
+        email_from=_optional(environ, "EMAIL_FROM"),
+        email_reply_to=_optional(environ, "EMAIL_REPLY_TO"),
+        admin_notify_email=_optional(environ, "ADMIN_NOTIFY_EMAIL"),
     )
+    email_problems = _email_problems(settings)
+    if email_problems and not production:
+        raise SettingsError("; ".join(email_problems))
 
     if production:
         problems = [
@@ -245,6 +295,7 @@ def load_settings(environ: Mapping[str, str]) -> Settings:
                 _secret_problem("MFA_KEY", settings.mfa_key),
                 "DATABASE_URL is missing" if settings.database_url is None else None,
                 base_url_problem,
+                *email_problems,
             )
             if p is not None
         ]

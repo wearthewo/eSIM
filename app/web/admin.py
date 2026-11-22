@@ -108,13 +108,17 @@ async def approve_request(request: Request, admin: Admin, request_id: IdParam) -
             error=MSG_EXISTING_USER.format(email=result.email),
             status_code=409,
         )
-    return link_page(
+    return await link_page(
         request,
+        kind="invite",
         heading=f"Approved: {result.company_name}",
         email=result.email,
         token=result.token or "",
         back_url=f"/admin/orgs/{result.organization_id}",
         back_label="Go to the new organization",
+        actor_id=admin.user_id,
+        organization_id=result.organization_id,
+        role=Role.OWNER,
     )
 
 
@@ -258,13 +262,17 @@ async def invite_to_org(request: Request, admin: Admin, org_id: IdParam) -> Resp
         )
     except AdminError as exc:
         return await _org_page(request, org_id, error=str(exc), status_code=400)
-    return link_page(
+    return await link_page(
         request,
+        kind="invite",
         heading=f"Invite link ({role.value})",
         email=email.strip().lower(),
         token=token,
         back_url=f"/admin/orgs/{org_id}",
         back_label="Back to the organization",
+        actor_id=admin.user_id,
+        organization_id=org_id,
+        role=role,
     )
 
 
@@ -295,13 +303,16 @@ async def _user_route(
         raise not_found()
     back = f"/admin/orgs/{result.organization_id}" if result.organization_id else "/admin/orgs"
     if result.token is not None:
-        return link_page(
+        return await link_page(
             request,
+            kind="reset",
             heading="Password reset link",
             email=result.email,
             token=result.token,
             back_url=back,
             back_label="Back",
+            actor_id=admin.user_id,
+            organization_id=result.organization_id,
         )
     return redirect(back)
 

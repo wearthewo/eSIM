@@ -15,13 +15,14 @@ Rules:
   prefix. Never an email address, password or token.
 - Sessions: 7 days absolute, 12 hours idle; ``last_seen_at`` is written at most
   once per ``LAST_SEEN_RESOLUTION``.
-- Links (invites, password tokens) are single use and expire after ``LINK_TTL``.
+- Links (invites, password tokens) are single use and expire after ``LINK_TTL``;
+  "Forgot password?" links (``request_password_reset``) after ``RESET_LINK_TTL``.
 """
 
 from __future__ import annotations
 
 import datetime as dt
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from ipaddress import IPv4Network, IPv6Network
 
 from sqlalchemy import ColumnElement, delete, func, select, update
@@ -54,12 +55,23 @@ LAST_SEEN_RESOLUTION = dt.timedelta(minutes=5)
 
 LINK_TTL = dt.timedelta(hours=48)
 
+# "Forgot password?" (request_password_reset)
+RESET_LINK_TTL = dt.timedelta(hours=1)
+RESET_WINDOW = dt.timedelta(hours=1)
+RESET_MAX_PER_USER = 3  # links emailed to one account per window
+RESET_MAX_PER_IP = 3  # requests (any address) from one IP prefix per window
+# pg_advisory_xact_lock(class, key) classes (app/auth/access.py uses 0x65530001,
+# app/batches.py 0x65530003).
+_RESET_IP_LOCK_CLASS = 0x6553_0004
+_RESET_USER_LOCK_CLASS = 0x6553_0005
+
 # audit_log.action values
 LOGIN = "login"
 LOGIN_BLOCKED = "login_blocked"
 LOGOUT = "logout"
 INVITE_ACCEPTED = "invite_accepted"
 PASSWORD_SET = "password_set"  # noqa: S105  (an audit action name, not a password)
+PASSWORD_RESET_REQUESTED = "password_reset_requested"  # noqa: S105  (an audit action name)
 
 
 class AdminError(Exception):
@@ -388,16 +400,83 @@ def create_org(db: Session, name: str) -> int:
     return org.id
 
 
-def new_password_token(db: Session, user_id: int, now: dt.datetime) -> str:
-    """A new set-password link for the user; earlier unused ones stop working."""
+def new_password_token(
+    db: Session, user_id: int, now: dt.datetime, *, ttl: dt.timedelta = LINK_TTL
+) -> str:
+    """A new set-password link for the user, valid for ``ttl``; earlier unused ones stop
+    working."""
     db.execute(
         update(PasswordToken)
         .where(PasswordToken.user_id == user_id, PasswordToken.used_at.is_(None))
         .values(used_at=now)
     )
     token = new_token()
-    db.add(PasswordToken(token_hash=digest(token), user_id=user_id, expires_at=now + LINK_TTL))
+    db.add(PasswordToken(token_hash=digest(token), user_id=user_id, expires_at=now + ttl))
     return token
+
+
+# --- Forgot password ------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class ResetGrant:
+    """A reset link to email: ``email`` is the user's stored address."""
+
+    token: str
+    user_id: int
+    organization_id: int | None
+    email: str = field(repr=False)
+
+
+def _reset_requests(db: Session, since: dt.datetime, *conditions: ColumnElement[bool]) -> int:
+    query = select(func.count(AuditLog.id)).where(
+        AuditLog.action == PASSWORD_RESET_REQUESTED, AuditLog.created_at > since, *conditions
+    )
+    return db.scalar(query) or 0
+
+
+def request_password_reset(
+    db: Session, email: str, *, ip: IpPrefix | None, now: dt.datetime
+) -> ResetGrant | None:
+    """ "Forgot password?": a 1-hour reset link for ``email``, or ``None``.
+
+    Only a user who may log in (enabled, has a password, organization enabled) gets a
+    link, and at most ``RESET_MAX_PER_USER`` per ``RESET_WINDOW``. Every request counts
+    towards ``RESET_MAX_PER_IP`` for its IP prefix, whatever the address. Each request
+    adds a ``password_reset_requested`` audit row (success when a link was made),
+    never with the email. The caller answers every request the same way. Two-factor
+    authentication is not touched.
+    """
+    db.execute(select(func.pg_advisory_xact_lock(_RESET_IP_LOCK_CLASS, func.hashtext(str(ip)))))
+    user = user_by_email(db, email) if len(email) <= MAX_EMAIL_CHARS else None
+    if user is not None:  # always after the IP lock: one lock order, no deadlock
+        db.execute(select(func.pg_advisory_xact_lock(_RESET_USER_LOCK_CLASS, user.id)))
+    since = now - RESET_WINDOW
+    ip_condition = AuditLog.ip_prefix == ip if ip is not None else AuditLog.ip_prefix.is_(None)
+    allowed = (
+        user is not None
+        and login_allowed(db, user)
+        and _reset_requests(db, since, ip_condition) < RESET_MAX_PER_IP
+        and _reset_requests(
+            db,
+            since,
+            AuditLog.target_user_id == user.id,
+            AuditLog.outcome == AuditOutcome.SUCCESS,
+        )
+        < RESET_MAX_PER_USER
+    )
+    who = {
+        "now": now,
+        "ip": ip,
+        "target_user_id": user.id if user is not None else None,
+        "organization_id": user.organization_id if user is not None else None,
+    }
+    if not allowed or user is None:
+        audit(db, PASSWORD_RESET_REQUESTED, AuditOutcome.FAILURE, **who)
+        return None
+    token = new_password_token(db, user.id, now, ttl=RESET_LINK_TTL)
+    audit(db, PASSWORD_RESET_REQUESTED, AuditOutcome.SUCCESS, **who)
+    return ResetGrant(token, user.id, user.organization_id, user.email)
 
 
 def create_superadmin(db: Session, email: str, *, now: dt.datetime) -> str:

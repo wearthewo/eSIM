@@ -23,6 +23,7 @@ from app.auth.passwords import hash_password
 from app.auth.tokens import csrf_for
 from app.db.base import Base
 from app.db.models import Organization, Role, User
+from app.mail import FakeMailer
 from app.settings import Secret, Settings
 from app.web.auth import CSRF_HEADER, SESSION_COOKIE
 from app.web.main import create_app
@@ -72,10 +73,19 @@ def clean_db(db_engine: Engine) -> None:
 def make_app(
     clean_db: None, web_settings: Settings, web_sessions: sessionmaker[Session]
 ) -> Callable[..., FastAPI]:
-    def _make(settings: Settings | None = None, *, run_retention: bool = False) -> FastAPI:
+    def _make(
+        settings: Settings | None = None,
+        *,
+        run_retention: bool = False,
+        mailer: FakeMailer | None = None,
+    ) -> FastAPI:
         # The daily purge is off by default so tests that count audit rows stay exact.
+        # Email is off unless a FakeMailer is given: tests never build a real mailer.
         return create_app(
-            settings or web_settings, sessions=web_sessions, run_retention=run_retention
+            settings or web_settings,
+            sessions=web_sessions,
+            run_retention=run_retention,
+            mailer=mailer,
         )
 
     return _make

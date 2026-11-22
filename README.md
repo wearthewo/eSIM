@@ -150,8 +150,8 @@ uses `__Host-` Secure cookies.
      correct the variable under **Environment** (this redeploys). The app does not start
      without an `https://` value.
    - `BOOTSTRAP_SUPERADMIN_EMAIL`: your email address.
-   - `RESEND_API_KEY`, `EMAIL_FROM`, `ADMIN_NOTIFY_EMAIL`: leave them empty for now
-     (step 11).
+   - `RESEND_API_KEY`, `EMAIL_FROM`, `ADMIN_NOTIFY_EMAIL`, `EMAIL_REPLY_TO`: leave them
+     empty for now (step 11).
 3. **Deploy.** Click **Apply** and wait for the first deploy to go live.
 4. **Copy the link from the logs.** Open the service's **Logs** and search for
    `BOOTSTRAP:`. That line holds the one-time set-password link. It works once and
@@ -198,15 +198,8 @@ uses `__Host-` Secure cookies.
 10. **Update `PUBLIC_BASE_URL`** to `https://app.esimsheet.com` under **Environment**
     (this redeploys). Invite and reset links then use the new domain. Links already
     issued with the `.onrender.com` host keep working.
-11. **Later, when the email feature exists**, set:
-    - `EMAIL_BACKEND` = `resend`
-    - `RESEND_API_KEY` = a production API key
-    - `EMAIL_FROM` = `eSIM Sheet <no-reply@mail.esimsheet.com>`, once
-      `mail.esimsheet.com` is verified in Resend
-    - `ADMIN_NOTIFY_EMAIL`
-
-    Until then the app does not read these variables. `EMAIL_BACKEND=none` is only a
-    placeholder.
+11. **Turn on email** when you are ready: follow "Email" below. Until then
+    `EMAIL_BACKEND=none` and every link is shown on the page to copy.
 12. **Upgrade the database before day 30.** A free Render database expires 30 days
     after it was created, and 14 days after that it is deleted with all its data. It
     also has no backups. Before day 30, change `plan: free` to `plan: 0.1c-256mb` (or
@@ -218,10 +211,104 @@ Admin commands on Render run in the service's **Shell** as `python -m app.admin 
 (no `.venv` path). The daily retention purge runs inside the app, so no cron job is
 needed.
 
+## Email
+
+Email is off by default (`EMAIL_BACKEND=none`): links appear only on the page, to
+copy. With `EMAIL_BACKEND=resend` the app sends mail from
+`eSIM Sheet <no-reply@mail.esimsheet.com>` through the Resend HTTP API. It uses Python's
+standard library, with a 10-second timeout.
+
+What it sends:
+
+- **Invitations**: when you approve an access request, invite someone to an
+  organization, or an owner invites a team member. The page says "Invitation sent to
+  …" and "Didn't get it? Check your spam or junk folder.", and still offers the link
+  to copy.
+- **Reset links** from the admin and team "Reset link" buttons (valid 48 hours). The
+  page says "Reset link sent to …", with the same spam-folder hint.
+- **"Forgot password?"** on the login page (only while email is on). A person enters
+  their address and always sees the same answer: "If an account exists, we've sent a
+  link".
+  - Only enabled users who have a password get one.
+  - The link works once and expires in 1 hour.
+  - At most 3 links per hour per account, and 3 requests per hour per IP prefix.
+  - A reset never switches two-factor authentication off: the code is still needed.
+- **New access requests** go to `ADMIN_NOTIFY_EMAIL` (if set), with the company name
+  and volume band only.
+
+Emails are plain text plus simple HTML. They have no images and no tracking, and never
+contain activation codes or customer data. Each ends with
+`eSIM Sheet · <PUBLIC_BASE_URL>`. Addresses, links, message text and the API key are
+never logged.
+
+If sending fails (Resend down, bad key), the action still happens. The page says "We
+couldn't send the email; copy this link instead" and shows the link. An `email_failed`
+row is added to the audit log (ids only, no address), and the log line gives only the
+reason, for example `email not sent (HTTP 403)`. For "Forgot password?" and access
+requests the email goes out after the page is answered, so a failure shows only in the
+audit log.
+
+### Resend setup (once)
+
+1. **Domain**: `mail.esimsheet.com` is verified in Resend (region eu-west-1). Keep its
+   SPF and DKIM records in Cloudflare DNS exactly as Resend lists them. Add a DMARC
+   record if `esimsheet.com` has none: TXT `_dmarc.esimsheet.com` with
+   `v=DMARC1; p=none; rua=mailto:<your address>`. Tighten it to `p=quarantine` once
+   the reports look clean.
+2. **Tracking off**: Resend > Domains > `mail.esimsheet.com`: switch **open tracking**
+   and **click tracking** off. Click tracking would send every one-time link through
+   Resend's redirect, and open tracking adds a tracking image.
+3. **API key**: Resend > API Keys > Create. Permission **Sending access**, domain
+   `mail.esimsheet.com`. It is shown once: put it straight into Render (next step) and
+   your password manager.
+
+### Switching it on (Render)
+
+1. In the service's **Environment** set:
+   - `RESEND_API_KEY` = the key from step 3
+   - `EMAIL_FROM` = `eSIM Sheet <no-reply@mail.esimsheet.com>`
+   - `ADMIN_NOTIFY_EMAIL` = where new access requests go (optional)
+   - `EMAIL_REPLY_TO` = where replies go, for example `support@esimsheet.com`
+     (optional). It must be a mailbox someone reads; without it, replies go to the
+     `no-reply` sender. It is checked like `EMAIL_FROM` (`Name <address>` or an
+     address). When set, it is sent as `reply_to` in every Resend request.
+
+   Save. Nothing changes yet, because `EMAIL_BACKEND` is still `none`. If the service
+   was created before `EMAIL_REPLY_TO` was in `render.yaml`, add it here by hand:
+   Render asks for `sync: false` variables only when a Blueprint is first created.
+2. In `render.yaml`, change `EMAIL_BACKEND` from `none` to `resend`, then commit and
+   push. The Blueprint sync deploys it.
+   - Don't change `EMAIL_BACKEND` in the Dashboard: it is defined in `render.yaml`, so
+     the next sync would set it back.
+   - The values from step 1 are `sync: false` and are kept.
+3. With `resend`, the app refuses to start if `RESEND_API_KEY` or `EMAIL_FROM` is
+   missing, or if `EMAIL_FROM` is malformed. Render then keeps the previous version
+   running, and the deploy log names the variable.
+
+To switch email off again, set `EMAIL_BACKEND: none` in `render.yaml` and push.
+
+Locally, `.env` works the same way. Keep `EMAIL_BACKEND=none` there for everyday
+development, or the local app sends real mail. The tests never send mail: they use an
+in-memory fake.
+
+### Checking delivery
+
+```
+python scripts/send_test_email.py you@gmail.com                       # Render Shell
+.venv\Scripts\python.exe scripts\send_test_email.py you@outlook.com    # locally, from .env
+```
+
+It sends one short test message with the configured backend and prints `sent` or
+`not sent (<reason>)`. Check that it lands in the inbox, not spam, in both Gmail and
+Outlook.
+- In Gmail, open **Show original**: SPF, DKIM and DMARC should all say `PASS`.
+- In Outlook, view the message source: `Authentication-Results` should show `spf=pass`,
+  `dkim=pass` and `dmarc=pass`.
+
 ## Signing in
 
-Accounts are by invitation only. The invite (or a reset link from an administrator)
-sets the password. A new password never changes 2FA: someone with 2FA on who sets a
+Accounts are by invitation only. The invite (or a reset link from an administrator,
+or, with email on, from "Forgot password?") sets the password. A new password never changes 2FA: someone with 2FA on who sets a
 password from a link still has to enter the code before they are signed in.
 
 1. Go to `/login` and enter your email and password.

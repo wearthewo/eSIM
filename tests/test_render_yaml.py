@@ -74,6 +74,7 @@ def test_secrets_and_per_deploy_values_are_not_in_the_file(
         "RESEND_API_KEY",
         "EMAIL_FROM",
         "ADMIN_NOTIFY_EMAIL",
+        "EMAIL_REPLY_TO",
     ):
         assert env[name] == {"key": name, "sync": False}
 
@@ -81,9 +82,10 @@ def test_secrets_and_per_deploy_values_are_not_in_the_file(
 def test_fixed_values(env: dict[str, dict[str, Any]]) -> None:
     values = {k: v["value"] for k, v in env.items() if "value" in v}
     python_version = values.pop("PYTHON_VERSION")
+    # Switched to "resend" here once RESEND_API_KEY and EMAIL_FROM are set (README, "Email").
+    assert values.pop("EMAIL_BACKEND") in ("none", "resend")
     assert values == {
         "ENV": "production",
-        "EMAIL_BACKEND": "none",
         "GENERATE_SLOTS": "1",
         "UPLOAD_CACHE_MB": "100",
         "GENERATE_WAIT_SECONDS": "60",

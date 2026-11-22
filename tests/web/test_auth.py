@@ -422,6 +422,7 @@ def test_every_app_route_is_protected_or_known_public(web_app: FastAPI) -> None:
         "/login/2fa",
         "/invite/{token}",
         "/request-access",
+        "/forgot-password",
         "/static",
     }
     checked = set()
@@ -469,7 +470,8 @@ def _post_routes(app: FastAPI) -> list[str]:
         route.path
         for route in _routes(app)
         if "POST" in (getattr(route, "methods", None) or set())
-        and route.path not in {"/login", "/login/2fa", "/invite/{token}", "/request-access"}
+        and route.path
+        not in {"/login", "/login/2fa", "/invite/{token}", "/request-access", "/forgot-password"}
     )
 
 

@@ -16,9 +16,14 @@
     </div>
     <div class="form-actions"><button type="submit" class="btn btn-primary btn-block">Log in</button></div>
   </form>
+  {% if forgot_password %}<p><a href="/forgot-password">Forgot password?</a></p>{% endif %}
 </div>
 <div class="auth-links">
+  {% if forgot_password %}
+  <p>Accounts are by invitation only.</p>
+  {% else %}
   <p>Accounts are by invitation only. Forgot your password? Ask your administrator for a reset link.</p>
+  {% endif %}
   <p>No account yet? <a href="/request-access">Request access</a>.</p>
 </div>
 {% endblock %}

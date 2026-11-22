@@ -31,6 +31,7 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.concurrency import run_in_threadpool
@@ -42,9 +43,10 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.auth import retention
 from app.db.engine import make_engine
+from app.mail import Mailer, mailer_from
 from app.settings import Settings, check_web_settings, get_settings
 from app.upload_cache import UploadCache
-from app.web import account, admin, auth, history, public, team
+from app.web import account, admin, auth, forgot, history, public, team
 from app.web.routes import router
 
 RETENTION_CHECK_SECONDS = 60 * 60
@@ -172,17 +174,25 @@ def _lifespan(
     return lifespan
 
 
+_FROM_SETTINGS: Any = object()
+
+
 def create_app(
     settings: Settings | None = None,
     *,
     sessions: sessionmaker[Session] | None = None,
     run_retention: bool = True,
+    mailer: Mailer | None = _FROM_SETTINGS,
 ) -> FastAPI:
     """Build the FastAPI app: debug off, no API docs, security headers, static files,
     auth, routes. ``sessions`` defaults to a sessionmaker on ``DATABASE_URL``.
-    ``run_retention`` starts the daily purge with the app (tests turn it off)."""
+    ``run_retention`` starts the daily purge with the app (tests turn it off).
+    ``mailer`` defaults to the one ``EMAIL_BACKEND`` names (``None``: no email); tests
+    pass ``app.mail.FakeMailer``."""
     settings = settings if settings is not None else get_settings()
     check_web_settings(settings)
+    if mailer is _FROM_SETTINGS:
+        mailer = mailer_from(settings)
     if sessions is None and settings.database_url is not None:  # checked just above
         engine = make_engine(settings.database_url.reveal())
         sessions = sessionmaker(bind=engine, expire_on_commit=False)
@@ -197,6 +207,7 @@ def create_app(
     )
     app.state.settings = settings
     app.state.sessionmaker = sessions
+    app.state.mailer = mailer  # None: EMAIL_BACKEND=none, links are only shown
     # Checked rows between /validate and /generate, in this process's memory only.
     app.state.upload_cache = UploadCache(
         max_bytes=settings.upload_cache_mb * 1024 * 1024,
@@ -208,6 +219,7 @@ def create_app(
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
     app.add_api_route("/healthz", healthz, methods=["GET"], response_model=None)
     app.include_router(auth.router)
+    app.include_router(forgot.router)
     app.include_router(account.router)
     app.include_router(public.router)
     app.include_router(admin.router)

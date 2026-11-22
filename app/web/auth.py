@@ -402,7 +402,8 @@ def _login_page(
         request,
         "login.html",
         LOGIN_PURPOSE,
-        {"error": error},
+        # "Forgot password?" (app/web/forgot.py) only exists when email is on.
+        {"error": error, "forgot_password": request.app.state.mailer is not None},
         status_code=status_code,
         form_token=form_token,
     )
