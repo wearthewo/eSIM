@@ -72,6 +72,7 @@
   --shadow-md: 0 1px 2px rgba(15, 27, 45, 0.06), 0 4px 16px rgba(15, 27, 45, 0.06);
 
   --container: 72rem;
+  --footer-height: 3.25rem;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -269,7 +270,7 @@ strong { font-weight: 650; }
 
 /* Logged-out pages: one centred card. */
 .auth-shell {
-  min-height: 100vh;
+  min-height: calc(100vh - var(--footer-height));
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -290,6 +291,28 @@ strong { font-weight: 650; }
   font-size: 0.875rem;
 }
 .auth-links p { margin: 0 0 var(--space-2); }
+
+/* Footer (every page) and the consent line under the public forms. */
+.site-footer {
+  min-height: var(--footer-height);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 0.8125rem;
+}
+.form-note { color: var(--text-muted); font-size: 0.8125rem; margin: var(--space-3) 0 0; text-align: center; }
+
+/* Privacy Policy and Terms of Use. */
+.legal { width: 100%; max-width: 48rem; margin: 0 auto; }
+.legal h2 { margin-top: var(--space-5); }
+.legal ul { margin: 0 0 var(--space-3); padding-left: var(--space-5); }
+.legal li { margin: 0 0 var(--space-2); }
+.legal .table-wrap > table { width: 100%; }
+.legal-updated { color: var(--text-muted); font-size: 0.875rem; }
+.placeholder { color: var(--error); font-weight: 600; }
 
 /* 4. Components ---------------------------------------------------------------------- */
 

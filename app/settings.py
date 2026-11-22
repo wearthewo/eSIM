@@ -146,6 +146,9 @@ class Settings:
     email_from: str | None = None  # "eSIM Sheet <no-reply@mail.esimsheet.com>"
     email_reply_to: str | None = None  # optional "support@esimsheet.com": replies go there
     admin_notify_email: str | None = None  # new access requests; optional
+    # Shown on /privacy and /terms (app/web/legal.py); required in production.
+    operator_name: str | None = None  # who runs the service, e.g. a company name
+    contact_email: str | None = None  # e.g. "support@esimsheet.com"
 
     @property
     def is_production(self) -> bool:
@@ -239,6 +242,33 @@ def _email_problems(settings: Settings) -> list[str]:
     return problems
 
 
+MAX_OPERATOR_NAME_CHARS = 200
+
+
+def _legal_problems(settings: Settings, *, production: bool) -> list[str]:
+    """What is wrong with OPERATOR_NAME and CONTACT_EMAIL (names only, never values).
+
+    A malformed value is refused everywhere; a missing one only in production
+    (development shows a placeholder on /privacy and /terms)."""
+    problems = []
+    name = settings.operator_name
+    if name is None:
+        if production:
+            problems.append("OPERATOR_NAME is missing")
+    elif len(name) > MAX_OPERATOR_NAME_CHARS or any(ord(ch) < 32 or ord(ch) == 127 for ch in name):
+        problems.append(
+            f"OPERATOR_NAME must be at most {MAX_OPERATOR_NAME_CHARS} characters, "
+            "without control characters"
+        )
+    contact = settings.contact_email
+    if contact is None:
+        if production:
+            problems.append("CONTACT_EMAIL is missing")
+    elif not _ADDRESS_RE.fullmatch(contact):
+        problems.append("CONTACT_EMAIL must be an email address")
+    return problems
+
+
 def load_settings(environ: Mapping[str, str]) -> Settings:
     """Build ``Settings`` from ``environ``. Raises ``SettingsError`` if they are unusable.
 
@@ -281,10 +311,13 @@ def load_settings(environ: Mapping[str, str]) -> Settings:
         email_from=_optional(environ, "EMAIL_FROM"),
         email_reply_to=_optional(environ, "EMAIL_REPLY_TO"),
         admin_notify_email=_optional(environ, "ADMIN_NOTIFY_EMAIL"),
+        operator_name=_optional(environ, "OPERATOR_NAME"),
+        contact_email=_optional(environ, "CONTACT_EMAIL"),
     )
     email_problems = _email_problems(settings)
-    if email_problems and not production:
-        raise SettingsError("; ".join(email_problems))
+    legal_problems = _legal_problems(settings, production=production)
+    if (email_problems or legal_problems) and not production:
+        raise SettingsError("; ".join(email_problems + legal_problems))
 
     if production:
         problems = [
@@ -296,6 +329,7 @@ def load_settings(environ: Mapping[str, str]) -> Settings:
                 "DATABASE_URL is missing" if settings.database_url is None else None,
                 base_url_problem,
                 *email_problems,
+                *legal_problems,
             )
             if p is not None
         ]

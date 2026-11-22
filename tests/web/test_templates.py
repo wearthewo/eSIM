@@ -199,7 +199,13 @@ def _assert_page_is_clean(c: TestClient, url: str, expected_status: int = 200) -
 
 @pytest.mark.parametrize(
     ("url", "status"),
-    [("/login", 200), ("/request-access", 200), ("/invite/" + "x" * 43, 404)],
+    [
+        ("/login", 200),
+        ("/request-access", 200),
+        ("/privacy", 200),
+        ("/terms", 200),
+        ("/invite/" + "x" * 43, 404),
+    ],
 )
 def test_public_pages_are_clean(anon: TestClient, url: str, status: int) -> None:
     _assert_page_is_clean(anon, url, status)

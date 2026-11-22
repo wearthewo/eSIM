@@ -30,6 +30,8 @@ TEST_DB_URL = f"postgresql://esim:{PASSWORD}@db.example.invalid:5432/esim_test"
 SECRET_KEY = "s" * 40
 FINGERPRINT_KEY = "f" * 40
 MFA_KEY = "m" * 40
+OPERATOR_NAME = "Synthetic Operator Ltd (test)"
+CONTACT_EMAIL = "support@example.invalid"
 
 
 def _prod(**overrides: str | None) -> dict[str, str]:
@@ -40,6 +42,8 @@ def _prod(**overrides: str | None) -> dict[str, str]:
         "FINGERPRINT_KEY": FINGERPRINT_KEY,
         "MFA_KEY": MFA_KEY,
         "PUBLIC_BASE_URL": "https://esim.example.invalid",
+        "OPERATOR_NAME": OPERATOR_NAME,
+        "CONTACT_EMAIL": CONTACT_EMAIL,
     }
     for name, value in overrides.items():
         if value is None:
@@ -212,6 +216,52 @@ def test_malformed_addresses_are_refused(name: str, value: str) -> None:
         load_settings({name: value})
     assert name in str(info.value)
     assert value not in str(info.value)
+
+
+# --- operator and contact (/privacy, /terms) ---------------------------------------------
+
+
+def test_operator_and_contact_are_read() -> None:
+    settings = load_settings(_prod(OPERATOR_NAME=f"  {OPERATOR_NAME} "))
+    assert settings.operator_name == OPERATOR_NAME
+    assert settings.contact_email == CONTACT_EMAIL
+
+
+def test_development_allows_operator_and_contact_unset() -> None:
+    settings = load_settings({"OPERATOR_NAME": " ", "CONTACT_EMAIL": ""})
+    assert settings.operator_name is None
+    assert settings.contact_email is None
+
+
+@pytest.mark.parametrize("name", ["OPERATOR_NAME", "CONTACT_EMAIL"])
+@pytest.mark.parametrize("value", [None, "", "   "], ids=["unset", "empty", "blank"])
+def test_production_requires_operator_and_contact(name: str, value: str | None) -> None:
+    with pytest.raises(SettingsError) as info:
+        load_settings(_prod(**{name: value}))
+    message = str(info.value)
+    assert message.startswith("Refusing to start in production")
+    assert f"{name} is missing" in message
+
+
+@pytest.mark.parametrize("production", [False, True], ids=["development", "production"])
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("CONTACT_EMAIL", "support at example"),
+        ("CONTACT_EMAIL", "Support <support@example.invalid>"),
+        ("CONTACT_EMAIL", "support@example"),
+        ("OPERATOR_NAME", "Operator\tLtd"),
+        ("OPERATOR_NAME", "x" * 201),
+    ],
+    ids=["no-at", "display-name", "no-tld", "control-char", "too-long"],
+)
+def test_malformed_operator_or_contact_is_refused(production: bool, name: str, value: str) -> None:
+    env = _prod(**{name: value}) if production else {name: value}
+    with pytest.raises(SettingsError) as info:
+        load_settings(env)
+    message = str(info.value)
+    assert name in message
+    assert value not in message
 
 
 def test_bootstrap_superadmin_email_is_read_and_blank_is_unset() -> None:

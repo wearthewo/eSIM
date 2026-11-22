@@ -1,0 +1,6 @@
+{# Shared by privacy.html and terms.html (app/web/legal.py). Periods always come from
+   the code: p("key") renders period[key] in a data-period span that the tests check. -#}
+{% macro operator_name(operator) %}{% if operator %}{{ operator }}{% else %}<span class="placeholder">[OPERATOR_NAME]</span>{% endif %}{% endmacro %}
+{% macro contact_link(contact) %}{% if contact %}<a href="mailto:{{ contact }}">{{ contact }}</a>{% else %}<span class="placeholder">[CONTACT_EMAIL]</span>{% endif %}{% endmacro %}
+{% macro updated(date) %}<p class="legal-updated">Last updated: <time datetime="{{ date.isoformat() }}">{{ date.day }} {{ date.strftime("%B %Y") }}</time></p>{% endmacro %}
+{% macro p(period, key) %}<span data-period="{{ key }}">{{ period[key] }}</span>{% endmacro %}

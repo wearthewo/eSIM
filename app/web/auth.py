@@ -27,7 +27,8 @@ yet and use a signed form token tied to the pre-auth cookie instead
 (``app.auth.tokens``; ``form_page`` and ``check_form`` here).
 
 Never log passwords, tokens or emails. ``RedactInviteTokens`` keeps link tokens
-out of the uvicorn access log.
+out of the uvicorn access log, and ``TruncateClientAddress`` writes only the client's
+/24 or /48 there (as the audit log), never the full IP address or port.
 """
 
 from __future__ import annotations
@@ -716,11 +717,50 @@ class RedactInviteTokens(logging.Filter):
         return True
 
 
+def client_prefix_text(client_addr: object) -> str:
+    """uvicorn's ``"host:port"`` as the audit log's prefix (``203.0.113.0/24``,
+    ``2001:db8:1::/48``); ``"-"`` for anything that is not an IP address.
+
+    uvicorn writes IPv6 without brackets, so the last ``:`` always starts the port."""
+    if not isinstance(client_addr, str) or not client_addr:
+        return "-"
+    host, sep, port = client_addr.rpartition(":")
+    if not sep or not port.isdigit():
+        host = client_addr
+    try:
+        return str(ip_prefix(host))
+    except ValueError:
+        return "-"
+
+
+class TruncateClientAddress(logging.Filter):
+    """Replace the client ``host:port`` of uvicorn access log lines with its /24 or /48.
+
+    uvicorn's access line is ``'%s - "%s %s HTTP/%s" %d'`` with the address first
+    (``uvicorn.protocols.utils.get_client_addr``). Only records of that shape change."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if (
+            isinstance(record.msg, str)
+            and record.msg.startswith("%s - ")
+            and isinstance(args, tuple)
+            and args
+        ):
+            record.args = (client_prefix_text(args[0]), *args[1:])
+        return True
+
+
 REDACTED_LOGGERS = ("uvicorn.access", "uvicorn.error")
+ACCESS_LOGGER = "uvicorn.access"
 
 
 def install_log_redaction() -> None:
+    """Invite tokens out of uvicorn's logs; only IP prefixes in its access log."""
     for name in REDACTED_LOGGERS:
         logger = logging.getLogger(name)
         if not any(isinstance(f, RedactInviteTokens) for f in logger.filters):
             logger.addFilter(RedactInviteTokens())
+    access = logging.getLogger(ACCESS_LOGGER)
+    if not any(isinstance(f, TruncateClientAddress) for f in access.filters):
+        access.addFilter(TruncateClientAddress())

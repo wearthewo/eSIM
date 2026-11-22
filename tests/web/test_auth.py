@@ -423,6 +423,8 @@ def test_every_app_route_is_protected_or_known_public(web_app: FastAPI) -> None:
         "/invite/{token}",
         "/request-access",
         "/forgot-password",
+        "/privacy",
+        "/terms",
         "/static",
     }
     checked = set()
@@ -452,7 +454,9 @@ def test_every_app_route_is_protected_or_known_public(web_app: FastAPI) -> None:
     assert checked == core | MANAGEMENT_PATHS
 
 
-@pytest.mark.parametrize("path", ["/healthz", "/login", "/static/app.css", "/static/app.js"])
+@pytest.mark.parametrize(
+    "path", ["/healthz", "/login", "/privacy", "/terms", "/static/app.css", "/static/app.js"]
+)
 def test_public_routes(anon: TestClient, path: str) -> None:
     assert anon.get(path).status_code == 200
 

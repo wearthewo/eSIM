@@ -46,7 +46,7 @@ from app.db.engine import make_engine
 from app.mail import Mailer, mailer_from
 from app.settings import Settings, check_web_settings, get_settings
 from app.upload_cache import UploadCache
-from app.web import account, admin, auth, forgot, history, public, team
+from app.web import account, admin, auth, forgot, history, legal, public, team
 from app.web.routes import router
 
 RETENTION_CHECK_SECONDS = 60 * 60
@@ -222,6 +222,7 @@ def create_app(
     app.include_router(forgot.router)
     app.include_router(account.router)
     app.include_router(public.router)
+    app.include_router(legal.router)
     app.include_router(admin.router)
     app.include_router(team.router)
     app.include_router(history.router)

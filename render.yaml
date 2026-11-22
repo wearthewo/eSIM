@@ -68,6 +68,11 @@ services:
         sync: false
       - key: EMAIL_REPLY_TO # optional, e.g. support@esimsheet.com: where replies go
         sync: false
+      # Shown on /privacy and /terms; the app refuses to start in production without them.
+      - key: OPERATOR_NAME # who runs the service (your company or your name)
+        sync: false
+      - key: CONTACT_EMAIL # e.g. support@esimsheet.com
+        sync: false
       # "none": links are only shown on the page. To turn email on, set RESEND_API_KEY and
       # EMAIL_FROM in the Dashboard first, then change this to "resend" here and push
       # (a Dashboard change to this value would be undone by the next Blueprint sync).

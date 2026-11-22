@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% import "_legal.html" as legal %}
+{% block title %}Terms of Use · {{ site_name }}{% endblock %}
+{% block content %}
+<article class="card legal">
+  <h1>Terms of Use</h1>
+  {{ legal.updated(last_updated) }}
+
+  <h2>Who we are</h2>
+  <p>{{ site_name }} is run by {{ legal.operator_name(operator) }} ("we"). By using it you agree to these terms and to our <a href="/privacy">Privacy Policy</a>. Contact: {{ legal.contact_link(contact) }}.</p>
+
+  <h2>Who may use it</h2>
+  <p>The service is for businesses that distribute eSIMs. Accounts are by invitation only. The owner of an organization is responsible for the people they invite. Keep your password and two-factor codes to yourself.</p>
+
+  <h2>Acceptable use</h2>
+  <ul>
+    <li>Do not pretend to be a mobile operator, carrier, brand or company you do not represent, and do not use logos or names you have no right to use.</li>
+    <li>Upload only activation codes you are entitled to distribute.</li>
+    <li>Do not abuse the service: no attempts to break in, get around limits, overload it or read other organizations' data, and nothing unlawful.</li>
+  </ul>
+
+  <h2>Your data and your customers</h2>
+  <p>You are responsible for the files you upload: that the data is correct, that you may use it, the activation codes in it, and your dealings with your own customers. We process the data in your files only to make your PDFs, on your behalf, as described in the <a href="/privacy">Privacy Policy</a>. Check the PDFs before you send them.</p>
+
+  <h2>Limits</h2>
+  <p>Each organization can generate up to <span data-limit="daily_quota">{{ "{:,}".format(daily_quota) }}</span> rows per day unless we agree otherwise. The limit resets every day at midnight UTC. One upload can have up to <span data-limit="max_rows">{{ "{:,}".format(max_rows) }}</span> rows and be up to <span data-limit="max_upload_mb">{{ max_upload_mb }}</span> MB.</p>
+
+  <h2>Provided as is</h2>
+  <p>We work to keep the service correct and available, but we provide it as is, without guarantees. We do not promise that it will always be available or free of errors, including in the PDFs and the duplicate check. Maintenance may interrupt it.</p>
+
+  <h2>Liability</h2>
+  <p>As far as the law allows, we are not liable for indirect losses, lost profits or lost data, and our total liability is limited to the fees you paid us in the twelve months before the claim. Nothing in these terms limits liability that cannot be limited by law.</p>
+
+  <h2>Suspension and termination</h2>
+  <p>We may suspend or close an account or organization that breaks these terms or puts the service or other users at risk. You can stop using the service at any time and ask us to delete your data.</p>
+
+  <h2>Changes to these terms</h2>
+  <p>We may change these terms. We publish the new version here with its date and email account owners about important changes. If you keep using the service after a change, the new terms apply.</p>
+
+  <h2>Governing law</h2>
+  <p>These terms are governed by Greek law. Courts of Athens, Greece, have jurisdiction, without prejudice to mandatory consumer rules.</p>
+
+  <h2>Contact</h2>
+  <p>Questions about these terms: {{ legal.contact_link(contact) }}.</p>
+</article>
+{% endblock %}

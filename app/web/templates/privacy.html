@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+{% import "_legal.html" as legal %}
+{% block title %}Privacy Policy · {{ site_name }}{% endblock %}
+{% block content %}
+<article class="card legal">
+  <h1>Privacy Policy</h1>
+  {{ legal.updated(last_updated) }}
+
+  <h2>Who we are</h2>
+  <p>{{ site_name }} is run by {{ legal.operator_name(operator) }} ("we"). It turns files of eSIM activation codes into branded PDFs with QR codes. Contact: {{ legal.contact_link(contact) }}.</p>
+
+  <h2>Two roles</h2>
+  <ul>
+    <li><strong>Account data</strong> (your login, your organization, the records listed below): we decide how it is used, so we are the <em>controller</em>.</li>
+    <li><strong>The files you upload</strong> (activation codes, ICCIDs, confirmation codes, customer names and emails): your company is the controller. We act as your <em>processor</em> and use this data only to make your PDFs. If you received an eSIM from one of our customers, contact that company about your data.</li>
+  </ul>
+
+  <h2>What we store</h2>
+  <ul>
+    <li><strong>Accounts:</strong> email address, organization, role (owner or member), whether the account is an administrator or disabled, when it was created and last signed in. Passwords are stored only as an argon2id hash.</li>
+    <li><strong>Sessions:</strong> only hashes of the session and form-protection tokens.</li>
+    <li><strong>Two-factor authentication:</strong> the authenticator secret, encrypted (AES-256-GCM). Recovery codes are stored only as keyed hashes (HMAC). Neither is shown again after setup.</li>
+    <li><strong>Invitation and password links:</strong> a hash of the link, its expiry and whether it was used. For invitations, also the invited email address, organization and role.</li>
+    <li><strong>Access requests:</strong> company name, your name, work email, expected monthly volume and your optional note.</li>
+    <li><strong>Audit log:</strong> security events (sign-ins, invitations, changes to accounts and batches). Each entry has the user and organization IDs, the action, the result, the time and the first part of the IP address (an IP prefix: /{{ ipv4_prefix }} for IPv4, /{{ ipv6_prefix }} for IPv6). It never has email addresses, passwords or codes.</li>
+    <li><strong>Batches:</strong> for each upload that passed the check, the file name, row and part counts, warning and error counts, status, who uploaded it and when, and whether it was voided and by whom.</li>
+    <li><strong>Fingerprints:</strong> a keyed hash (HMAC-SHA256) of each ICCID and activation code that was turned into a PDF, so the same eSIM is not issued twice. The codes cannot be recovered from these.</li>
+    <li><strong>Usage:</strong> the number of rows generated per organization per day, for the daily limit.</li>
+  </ul>
+
+  <h2>What we never store</h2>
+  <p>Uploaded files, activation codes, confirmation codes, PDFs and ZIP files, customer names and customer emails, and the branding you enter (company name, colour, footer text, logo). None of these are written to disk, to logs or to the database.</p>
+
+  <h2>Kept in memory only</h2>
+  <p>After a file passes the check, its rows (including the activation codes) stay in the server's memory so a large order can download in parts. They are deleted {{ legal.p(period, "upload_cache") }} after they were last used, or sooner: when every part has been downloaded, when generation fails, when the batch is voided, when memory runs short, or when the server restarts.</p>
+
+  <h2>How long we keep it</h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th scope="col">Data</th><th scope="col">How long</th></tr></thead>
+      <tbody>
+        <tr><td>Rows kept in memory</td><td>{{ legal.p(period, "upload_cache") }} after last use</td></tr>
+        <tr><td>Access requests</td><td>{{ legal.p(period, "access_requests") }}, whether approved or not</td></tr>
+        <tr><td>Audit log</td><td>{{ legal.p(period, "audit_log") }}</td></tr>
+        <tr><td>Sessions</td><td>End after {{ legal.p(period, "session_idle") }} without activity, after {{ legal.p(period, "session_absolute") }} at most, or when you log out. Removed at the next daily clean-up.</td></tr>
+        <tr><td>Invitation and password links</td><td>Invitations and links from an administrator work for {{ legal.p(period, "invite_link") }}, "Forgot password" links for {{ legal.p(period, "reset_link") }}. Used or expired links are deleted {{ legal.p(period, "spent_links") }} after they were made.</td></tr>
+        <tr><td>Batches that were only checked (nothing generated)</td><td>Deleted by the daily clean-up once older than {{ legal.p(period, "validated_batches") }}</td></tr>
+        <tr><td>Fingerprints</td><td>{{ legal.p(period, "fingerprints") }}, or sooner if the batch is voided</td></tr>
+        <tr><td>Accounts, organizations, batches with generated PDFs, usage counts</td><td>While your organization uses the service. Deleted on request.</td></tr>
+        <tr><td>Request logs</td><td>Our request logs record the IP prefix (never the full address), time, page and response code. Invitation links are removed from them. Our host, Render, may keep its own platform logs under its terms.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>Who processes data for us</h2>
+  <ul>
+    <li><strong>Render</strong> (render.com): hosting, database and request logs, in Frankfurt, Germany (EU).</li>
+    <li><strong>Resend</strong> (resend.com): sends account emails from its EU region, only when email sending is switched on.</li>
+    <li><strong>Cloudflare</strong> (cloudflare.com): DNS for esimsheet.com, and forwarding of mail sent to {{ legal.contact_link(contact) }}. Traffic to the app itself does not pass through Cloudflare.</li>
+    <li><strong>Google</strong> (Gmail): the mailbox that receives the forwarded mail.</li>
+  </ul>
+  <p>Cloudflare and Google are US companies and may process data outside the EU.</p>
+
+  <h2>Emails we send</h2>
+  <ul>
+    <li><strong>Invitation:</strong> your email address, a one-time link, the organization name and your role.</li>
+    <li><strong>Password reset:</strong> your email address and a one-time link.</li>
+    <li><strong>New access request</strong> (to us only): the company name and expected volume.</li>
+  </ul>
+  <p>Emails have no images and no tracking. They never contain activation codes or anything from your uploads.</p>
+
+  <h2>Cookies</h2>
+  <p>We use only the cookies the site needs to work, so there is no cookie banner. There are no analytics or tracking cookies, and the pages load nothing from other websites.</p>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th scope="col">Cookie</th><th scope="col">Purpose</th><th scope="col">Lifetime</th></tr></thead>
+      <tbody>
+        {% for cookie in cookies %}
+        <tr><td><code>{{ cookie.name }}</code></td><td>{{ cookie.purpose }}</td><td>{{ legal.p(period, cookie.key) }}{% if cookie.key == "session_absolute" %} at most; ends after {{ legal.p(period, "session_idle") }} without activity{% endif %}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p>When you are signed in, the form-protection token is part of the page, not a cookie.</p>
+
+  <h2>Your rights</h2>
+  <p>You can ask us for a copy of your data, to correct it, to delete it, to restrict its use or to receive it in a portable form, and you can object to how we use it. Write to {{ legal.contact_link(contact) }}. You can also complain to your data protection authority. For data in files a company uploaded about you, please contact that company first.</p>
+
+  <h2>Security</h2>
+  <p>The site works only over HTTPS. Passwords, links, recovery codes and code fingerprints are stored only as hashes, and two-factor secrets only encrypted. Two-factor sign-in is available to everyone and required for administrators.</p>
+
+  <h2>Changes</h2>
+  <p>When this policy changes we update this page and its date, and we email account owners about important changes.</p>
+</article>
+{% endblock %}

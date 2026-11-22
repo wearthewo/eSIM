@@ -31,6 +31,8 @@ PROD_ENV = {
     "FINGERPRINT_KEY": "f" * 44,
     "MFA_KEY": "m" * 44,
     "PUBLIC_BASE_URL": BASE_URL,
+    "OPERATOR_NAME": "Synthetic Operator Ltd (test)",
+    "CONTACT_EMAIL": "support@example.invalid",
 }
 
 
@@ -50,7 +52,16 @@ def _client(app: FastAPI, **kwargs) -> TestClient:
 
 
 @pytest.mark.parametrize(
-    "name", ["SECRET_KEY", "FINGERPRINT_KEY", "MFA_KEY", "DATABASE_URL", "PUBLIC_BASE_URL"]
+    "name",
+    [
+        "SECRET_KEY",
+        "FINGERPRINT_KEY",
+        "MFA_KEY",
+        "DATABASE_URL",
+        "PUBLIC_BASE_URL",
+        "OPERATOR_NAME",
+        "CONTACT_EMAIL",
+    ],
 )
 def test_refuses_to_start_with_a_missing_setting(monkeypatch, name: str) -> None:
     """``uvicorn app.web.main:app`` builds the app from the environment (get_settings)."""

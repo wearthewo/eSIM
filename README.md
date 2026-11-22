@@ -137,8 +137,8 @@ Every start of the service runs `alembic upgrade head`, then
 `python -m app.admin bootstrap`, then uvicorn: one worker, with the proxy headers
 trusted so that rate limits see real client IPs. Render's health check is `/healthz`,
 which needs no database and no login. In production the app refuses to start if a key,
-`DATABASE_URL` or an `https://` `PUBLIC_BASE_URL` is missing. It also sends HSTS and
-uses `__Host-` Secure cookies.
+`DATABASE_URL`, an `https://` `PUBLIC_BASE_URL`, `OPERATOR_NAME` or `CONTACT_EMAIL` is
+missing. It also sends HSTS and uses `__Host-` Secure cookies.
 
 1. **Create the Blueprint.** Push the repo to GitHub. In the Render Dashboard choose
    **New > Blueprint**, connect the repository and pick the branch. Render reads
@@ -150,6 +150,10 @@ uses `__Host-` Secure cookies.
      correct the variable under **Environment** (this redeploys). The app does not start
      without an `https://` value.
    - `BOOTSTRAP_SUPERADMIN_EMAIL`: your email address.
+   - `OPERATOR_NAME`: who runs the service (your company, or your name), and
+     `CONTACT_EMAIL`: the address for privacy and support questions, for example
+     `support@esimsheet.com`. Both appear on /privacy and /terms, and the app does not
+     start without them (see "Privacy and terms").
    - `RESEND_API_KEY`, `EMAIL_FROM`, `ADMIN_NOTIFY_EMAIL`, `EMAIL_REPLY_TO`: leave them
      empty for now (step 11).
 3. **Deploy.** Click **Apply** and wait for the first deploy to go live.
@@ -304,6 +308,49 @@ Outlook.
 - In Gmail, open **Show original**: SPF, DKIM and DMARC should all say `PASS`.
 - In Outlook, view the message source: `Authentication-Results` should show `spf=pass`,
   `dkim=pass` and `dmarc=pass`.
+
+## Privacy and terms
+
+`/privacy` (Privacy Policy) and `/terms` (Terms of Use) are public pages
+(`app/web/legal.py`). Every page links to both in its footer. The request-access,
+forgot-password and set-password (invite) forms say "By continuing you agree to the Terms
+and Privacy Policy." under the button.
+
+- `OPERATOR_NAME` and `CONTACT_EMAIL` are shown on both pages. In development they may be
+  left out, and the pages then show `[OPERATOR_NAME]` and `[CONTACT_EMAIL]` in red. In
+  production the app does not start without them. A malformed value (not an address,
+  control characters, over 200 characters) is refused everywhere.
+- Every period on /privacy comes from the code, not from the template: retention (audit
+  log, access requests, links, sessions, checked-only batches, fingerprints), the upload
+  cache's `UPLOAD_CACHE_TTL_MINUTES` and the cookie lifetimes.
+  `tests/web/test_legal.py` reads each one back and compares it with the constant or
+  setting, and fails if a template types a period itself. Changing a retention constant
+  changes the page. Change `LAST_UPDATED` in `app/web/legal.py` whenever the content
+  changes.
+- uvicorn's access log records only the client's IP prefix (/24 for IPv4, /48 for IPv6,
+  as in the audit log), never the full address or port, and invite tokens are redacted
+  (`app/web/auth.py`, `TruncateClientAddress`). The Privacy Policy says so. Render may
+  keep its own platform logs under its terms.
+
+### Before launch
+
+The pages are a plain-English draft, not legal advice. Before going live:
+
+- [ ] **Governing law (review):** the Terms say "These terms are governed by Greek law.
+  Courts of Athens, Greece, have jurisdiction, without prejudice to mandatory consumer
+  rules." Have it checked.
+- [ ] **Liability clause (review):** it caps liability at the fees paid in the twelve
+  months before a claim.
+- [ ] **Deletion:** the Privacy Policy says accounts and organizations are "deleted on
+  request". Today the app can only disable them. `delete-user` and `delete-organization`
+  admin commands are planned before launch; until then a deletion request is done by
+  hand in the database.
+- [ ] **Processors:** check the EU data-transfer terms of Cloudflare and Google (both US
+  companies), and that Resend sends from its EU region.
+- [ ] **Data processing agreement:** customers' upload data makes us their processor.
+  Decide whether customers also need a separate data processing agreement.
+- [ ] **Settings:** set `OPERATOR_NAME` and `CONTACT_EMAIL` on Render, and check that mail
+  to `CONTACT_EMAIL` arrives.
 
 ## Signing in
 

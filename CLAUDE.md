@@ -50,8 +50,11 @@ Tests pass, lint clean, only the requested module changed.
 - Invite-only accounts plus a public "Request access" form; no public sign-up.
 - Organizations with several users (roles: owner, member) and a super-admin (me).
 - The database stores metadata only: accounts, sessions, invites, access requests,
-  branding, batches, HMAC fingerprints of codes, audit log, usage. NEVER activation codes,
+  batches, HMAC fingerprints of codes, audit log, usage. NEVER activation codes,
   matching IDs, confirmation codes, uploaded files, PDFs, customer names or customer emails.
+- Branding is not stored: company name, colour, footer text and logo come with each
+  upload form and are used in memory for that request. The `branding` table exists but
+  nothing writes it (the Privacy Policy says branding is not stored; change both together).
 - Fingerprints are HMAC-SHA256 with FINGERPRINT_KEY, never plain hashes.
 - Two-factor authentication (app/auth/mfa.py): TOTP secrets are stored only AES-GCM
   encrypted with a subkey of MFA_KEY, recovery codes only as HMACs. Neither is ever
@@ -66,10 +69,16 @@ Tests pass, lint clean, only the requested module changed.
   read with .reveal() where used. Never log the database URL (use safe_database_url).
 - Schema changes go through an Alembic migration (migrations/); `alembic check` and
   tests/db/test_migrations.py must report no difference between models and migrations.
-- branding.logo_png is always PNG (the database checks the PNG signature). Store the
-  downscaled logo as a PNG file. Today prepare_branding (app/core/render.py) does not
-  produce one: it encodes PDF image streams (PNG pixel data or JPEG), and uploads may be
-  JPEG. The branding step needs a core helper that returns a downscaled PNG.
+- If branding is stored later: branding.logo_png is always PNG (the database checks the
+  PNG signature). Store the downscaled logo as a PNG file. Today prepare_branding
+  (app/core/render.py) does not produce one: it encodes PDF image streams (PNG pixel data
+  or JPEG), and uploads may be JPEG. That step needs a core helper that returns a
+  downscaled PNG.
+- /privacy and /terms (app/web/legal.py) state facts about the code. Periods are rendered
+  from the constants and settings, never typed into the templates (tests/web/test_legal.py
+  checks). OPERATOR_NAME and CONTACT_EMAIL are required in production.
+- uvicorn's access log shows only IP prefixes (/24, /48) and redacts invite tokens
+  (app/web/auth.py install_log_redaction). Never log a full client IP.
 - Every route that takes an ID (batch, user, invite, access request) must check it
   belongs to the current user's organization (or the user is superadmin). Return 404,
   not 403, for other organizations' IDs.

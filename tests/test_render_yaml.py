@@ -75,6 +75,8 @@ def test_secrets_and_per_deploy_values_are_not_in_the_file(
         "EMAIL_FROM",
         "ADMIN_NOTIFY_EMAIL",
         "EMAIL_REPLY_TO",
+        "OPERATOR_NAME",
+        "CONTACT_EMAIL",
     ):
         assert env[name] == {"key": name, "sync": False}
 
