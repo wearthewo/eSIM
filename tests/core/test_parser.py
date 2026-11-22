@@ -256,7 +256,7 @@ def test_parse_csv_semicolon_with_commas_in_values() -> None:
 
 
 def test_parse_csv_too_many_rows(too_many_rows_csv) -> None:
-    with pytest.raises(ParseError, match=str(parser.MAX_ROWS)):
+    with pytest.raises(ParseError, match=f"{parser.MAX_ROWS:,}"):
         parser.parse_csv(too_many_rows_csv)
 
 
@@ -272,7 +272,7 @@ def test_parse_csv_blank_rows_do_not_count_towards_limit() -> None:
 def test_parse_xlsx_too_many_rows(xlsx_bytes) -> None:
     rows: list[list[object]] = [["iccid", "activation_code"]]
     rows += [[f"{i:019d}", AC1] for i in range(parser.MAX_ROWS + 1)]
-    with pytest.raises(ParseError, match=str(parser.MAX_ROWS)):
+    with pytest.raises(ParseError, match=f"{parser.MAX_ROWS:,}"):
         parser.parse_xlsx(xlsx_bytes(rows))
 
 

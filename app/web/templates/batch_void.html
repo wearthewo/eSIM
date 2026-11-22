@@ -18,8 +18,8 @@
     <dt>Date and time</dt><dd>{{ batch.created_at | athens }}</dd>
     {% if is_admin %}<dt>Organization</dt><dd>{{ batch.organization_name }}</dd>{% endif %}
     <dt>File name</dt><dd>{{ batch.file_name }}</dd>
-    <dt>Rows</dt><dd>{{ batch.row_count }}</dd>
-    <dt>Parts downloaded</dt><dd>{{ batch.parts_downloaded }} / {{ batch.parts }}</dd>
+    <dt>Rows</dt><dd>{{ batch.row_count | thousands }}</dd>
+    <dt>Parts downloaded</dt><dd>{{ batch.parts_downloaded | thousands }} / {{ batch.parts | thousands }}</dd>
   </dl>
   {% if not batch.voided %}
   <p class="alert alert-warning void-warning">{{ warning }}</p>

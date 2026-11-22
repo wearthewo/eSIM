@@ -61,6 +61,7 @@ from app.auth.accounts import CurrentUser, IpPrefix
 from app.batches import Continuation, DailyUsage, UsedSummary
 from app.core import pipeline, sheets
 from app.core.models import Branding, EsimRecord, ParseError, ValidationReport
+from app.core.numbers import thousands
 from app.core.parser import MAX_ROWS, SUPPORTED_EXTENSIONS, ParsedUpload
 from app.core.pipeline import PartError, check_upload
 from app.db.models import Batch, BatchStatus
@@ -119,18 +120,21 @@ MSG_UNSUPPORTED = "Unsupported file type. Upload a .csv or .xlsx file."
 
 def _body_too_large_message(upload_bytes: int) -> str:
     return (
-        f"The upload is too large. Data files can be up to {upload_bytes // (1024 * 1024)} MB "
-        f"and logos up to {MAX_LOGO_BYTES // 1024} KB."
+        f"The upload is too large. Data files can be up to "
+        f"{thousands(upload_bytes // (1024 * 1024))} MB "
+        f"and logos up to {thousands(MAX_LOGO_BYTES // 1024)} KB."
     )
 
 
 def _too_large_messages(upload_bytes: int) -> dict[str, str]:
     return {
         DATA_FIELD: (
-            f"The data file is larger than {upload_bytes // (1024 * 1024)} MB. "
+            f"The data file is larger than {thousands(upload_bytes // (1024 * 1024))} MB. "
             "Split it into smaller files and upload them one at a time."
         ),
-        LOGO_FIELD: f"The logo is larger than {MAX_LOGO_BYTES // 1024} KB. Use a smaller image.",
+        LOGO_FIELD: (
+            f"The logo is larger than {thousands(MAX_LOGO_BYTES // 1024)} KB. Use a smaller image."
+        ),
     }
 
 
@@ -140,15 +144,16 @@ MSG_FIELD_TOO_LARGE = "A form field is too long."
 MSG_NO_ROWS = "The file has a header row but no data rows."
 MSG_BAD_LOGO = "The logo must be a PNG or JPEG image."
 MSG_LOGO_DIMENSIONS = (
-    f"The logo can be at most {MAX_LOGO_SIDE_PX} x {MAX_LOGO_SIDE_PX} pixels. Use a smaller image."
+    f"The logo can be at most {thousands(MAX_LOGO_SIDE_PX)} x {thousands(MAX_LOGO_SIDE_PX)} "
+    "pixels. Use a smaller image."
 )
 MSG_BUSY = "Server busy, try again in a minute."
 MSG_BAD_PART = (
     "The requested part does not match this file. Choose the file again and restart the download."
 )
 MSG_COMPANY_MISSING = "Enter a company name."
-MSG_COMPANY_LONG = f"The company name can be at most {MAX_COMPANY_CHARS} characters."
-MSG_FOOTER_LONG = f"The footer text can be at most {MAX_FOOTER_CHARS} characters."
+MSG_COMPANY_LONG = f"The company name can be at most {thousands(MAX_COMPANY_CHARS)} characters."
+MSG_FOOTER_LONG = f"The footer text can be at most {thousands(MAX_FOOTER_CHARS)} characters."
 MSG_BAD_COLOUR = "The primary colour must be a hex colour such as #1A4D8F."
 MSG_CONTROL_CHARS = "Company name and footer text must not contain control characters."
 MSG_NO_ORGANIZATION = "Generating PDFs needs an account in an organization."

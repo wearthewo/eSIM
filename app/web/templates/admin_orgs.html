@@ -7,7 +7,7 @@
     <p class="lead">Usage today and daily quotas, in rows per UTC day.</p>
   </div>
   <div class="page-actions">
-    <a class="btn" href="/admin/requests">Access requests ({{ pending_requests }} pending)</a>
+    <a class="btn" href="/admin/requests">Access requests ({{ pending_requests | thousands }} pending)</a>
   </div>
 </div>
 {% if not orgs %}
@@ -27,9 +27,9 @@
       {% for o in orgs %}
       <tr>
         <td><a href="/admin/orgs/{{ o.id }}">{{ o.name }}</a></td>
-        <td>{{ o.user_count }}</td>
-        <td>{{ "{:,}".format(o.rows_today) }}</td>
-        <td>{{ "{:,}".format(o.daily_row_quota) }}</td>
+        <td>{{ o.user_count | thousands }}</td>
+        <td>{{ o.rows_today | thousands }}</td>
+        <td>{{ o.daily_row_quota | thousands }}</td>
         <td>{% if o.disabled %}<span class="badge badge-error">disabled</span>{% else %}<span class="badge badge-success">enabled</span>{% endif %}</td>
       </tr>
       {% endfor %}

@@ -28,6 +28,7 @@ from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 
 from app.core.models import EsimRecord, ParseError
+from app.core.numbers import thousands
 
 MAX_ROWS = 10_000
 SUPPORTED_EXTENSIONS: frozenset[str] = frozenset({".csv", ".xlsx"})
@@ -242,8 +243,8 @@ def _xlsx_cells(
             out[index] = _trim(value)
         elif name in IDENTIFIER_COLUMNS:
             raise ParseError(
-                f"Row {number}, column '{name}': the cell is stored as a number or date, "
-                "not text. Format the column as Text and re-enter the values."
+                f"Row {thousands(number)}, column '{name}': the cell is stored as a number "
+                "or date, not text. Format the column as Text and re-enter the values."
             )
         else:
             out[index] = _trim(str(value))
@@ -274,7 +275,9 @@ def _build_records(
         if all(i >= len(cells) or cells[i] is None for i in indices):
             continue
         if len(records) >= limit:
-            raise ParseError(f"Too many rows: the limit is {limit} data rows per upload.")
+            raise ParseError(
+                f"Too many rows: the limit is {thousands(limit)} data rows per upload."
+            )
         records.append(_build_record(number, cells, columns))
     return records
 

@@ -51,6 +51,7 @@ from app.auth import accounts
 from app.auth.accounts import CurrentUser, IpPrefix
 from app.core import pipeline
 from app.core.models import EsimRecord, ValidationIssue, ValidationReport
+from app.core.numbers import thousands
 from app.db.fingerprints import fingerprinter
 from app.db.models import (
     MAX_FILE_NAME_CHARS,
@@ -89,7 +90,7 @@ BATCH_VOIDED = "batch_voided"
 QUOTA_EXCEEDED = "quota_exceeded"
 
 MSG_QUOTA = (
-    "Daily limit reached: {used:,} of {quota:,} rows used today. "
+    "Daily limit reached: {used} of {quota} rows used today. "
     "The limit resets at {reset} Greek time."
 )
 
@@ -586,7 +587,9 @@ def check_quota(db: Session, organization_id: int, rows: int, *, now: dt.datetim
 
 def quota_message(usage: DailyUsage, now: dt.datetime) -> str:
     """The refusal to show, with the reset time in Greek time (02:00 or 03:00, by DST)."""
-    return MSG_QUOTA.format(used=usage.used, quota=usage.quota, reset=daily_reset_athens(now))
+    return MSG_QUOTA.format(
+        used=thousands(usage.used), quota=thousands(usage.quota), reset=daily_reset_athens(now)
+    )
 
 
 def audit_quota_exceeded(

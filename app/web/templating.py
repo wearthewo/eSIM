@@ -18,6 +18,7 @@ from typing import Any
 from fastapi import Request
 from fastapi.templating import Jinja2Templates
 
+from app.core.numbers import thousands
 from app.localtime import format_athens
 
 TEMPLATES_DIR: Path = Path(__file__).parent / "templates"
@@ -41,3 +42,5 @@ def _utc(value: datetime | None) -> str:
 templates = Jinja2Templates(directory=TEMPLATES_DIR, context_processors=[_auth_context])
 templates.env.filters["utc"] = _utc
 templates.env.filters["athens"] = format_athens  # dd/mm/yyyy HH:mm, Greek time
+# Every number shown in a page: 10,000 (app/core/numbers.py). Not in attributes.
+templates.env.filters["thousands"] = thousands

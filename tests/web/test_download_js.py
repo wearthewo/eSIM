@@ -141,6 +141,7 @@ def render_index() -> str:
             csrf_token="synthetic-csrf",
             current_user=None,
             pending_requests=0,
+            cache_minutes=routes.DEFAULT_UPLOAD_CACHE_TTL_MINUTES,  # as routes._page passes it
         )
     )
 

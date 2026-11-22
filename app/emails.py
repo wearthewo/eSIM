@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from html import escape
 
+from app.core.numbers import thousands
 from app.mail import Message
 
 SITE_NAME = "eSIM Sheet"
@@ -94,7 +95,7 @@ def reset(to: str, *, link: str, hours: int, base_url: str, requested: bool) -> 
             "Hello,",
             f"{why} Open the link below to choose a new password.",
             ("Set a new password", link),
-            f"The link works once and expires in {hours} {unit}. "
+            f"The link works once and expires in {thousands(hours)} {unit}. "
             "Two-factor authentication stays on if you use it. "
             "If you did not ask for this, you can ignore this email: your password stays "
             "the same.",

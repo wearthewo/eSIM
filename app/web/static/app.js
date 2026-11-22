@@ -71,7 +71,7 @@
     current.mode = "choose";
     byId("progress").hidden = false;
     byId("generating").textContent = (note ? note + " " : "") + "This order has " +
-      current.parts + " parts. Choose a folder and each ZIP file is saved there as soon " +
+      thousands(current.parts) + " parts. Choose a folder and each ZIP file is saved there as soon " +
       "as it is ready, without a Save dialog for each file.";
     byId("cancel").hidden = false;
     byId("retry").hidden = true;
@@ -161,9 +161,14 @@
 
   // --- Texts of the progress line (single part and folder mode). -------------------------
 
-  function partOf(current) { return "part " + current.next + " of " + current.parts; }
+  // Every number in a message: 1001 -> "1,001" (as app/core/numbers.py on the server).
+  function thousands(n) { return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ","); }
 
-  function upTo(k) { return k === 1 ? "Part 1" : "Parts 1 to " + k; }
+  function partOf(current) {
+    return "part " + thousands(current.next) + " of " + thousands(current.parts);
+  }
+
+  function upTo(k) { return k === 1 ? "Part 1" : "Parts 1 to " + thousands(k); }
 
   // Saving into a folder (also while asked to choose it again part-way).
   function inFolder(current) { return Boolean(current.folder); }
@@ -178,15 +183,17 @@
   function generatingText(current) {
     var k = current.next - 1;
     if (k < 1) return "Generating " + partOf(current) + "…";
-    return "Saved part " + k + " of " + current.parts + " to " + current.folder.name + "." +
+    return "Saved part " + thousands(k) + " of " + thousands(current.parts) + " to " +
+      current.folder.name + "." +
       " Generating " + partOf(current) + "…";
   }
 
   function doneText(current) {
     if (current.mode === "folder") {
       var renamed = current.renamed.length;
-      return "Done: all " + current.parts + " ZIP files were saved to " + current.folder.name + "." +
-        (renamed ? " " + renamed + (renamed === 1 ? " file was" : " files were") +
+      return "Done: all " + thousands(current.parts) + " ZIP files were saved to " +
+        current.folder.name + "." +
+        (renamed ? " " + thousands(renamed) + (renamed === 1 ? " file was" : " files were") +
           " given a number, such as \"" + current.renamed[0] + "\", because the folder " +
           "already had a file of the same name." : "");
     }
@@ -199,7 +206,7 @@
       (inFolder(current) ? "saved." : "generated.") +
       (n > 1 ? doneSoFar(current) :
         inFolder(current) ? " Nothing was saved." : " Nothing was handed to your browser."),
-      n > 1 ? "Resume from part " + n : "Start again", current);
+      n > 1 ? "Resume from part " + thousands(n) : "Start again", current);
   }
 
   // Why a part failed, as a sentence.
@@ -409,7 +416,7 @@
       var name = fileName(response);
       if (current.mode === "folder") {
         if (run === current) {
-          setProgress(true, "Saving part " + n + " of " + current.parts + " to " +
+          setProgress(true, "Saving part " + thousands(n) + " of " + thousands(current.parts) + " to " +
             current.folder.name + "…", "", current);
         }
         return writeToFolder(current.folder, name, response, signal).then(function (saved) {
@@ -450,8 +457,8 @@
         setProgress(false, "Stopped at " + partOf(current) + ": the file did not pass validation.", "",
           current);
       } else {
-        setProgress(false, "Part " + n + " of " + current.parts + " failed. " +
-          whyFailed(reason, current) + doneSoFar(current), "Retry part " + n, current);
+        setProgress(false, "Part " + thousands(n) + " of " + thousands(current.parts) + " failed. " +
+          whyFailed(reason, current) + doneSoFar(current), "Retry part " + thousands(n), current);
       }
     });
   }
@@ -489,16 +496,13 @@
     cancelled: "Cancelled"
   };
 
-  // 1001 -> "1,001"
-  function grouped(n) { return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ","); }
-
   // "Part 3 · rows 1,001–1,500": the rows of the upload in part n.
   function partLabel(current, n) {
-    var label = "Part " + n;
+    var label = "Part " + thousands(n);
     if (!current.rows || !current.chunk) return label;
     var first = (n - 1) * current.chunk + 1;
     var last = Math.min(n * current.chunk, current.rows);
-    return label + " · rows " + grouped(first) + "–" + grouped(last);
+    return label + " · rows " + thousands(first) + "–" + thousands(last);
   }
 
   function downloadedCount(current) {
@@ -560,13 +564,13 @@
       var button = row.querySelector("[data-download-part]");
       if (state === "downloaded") {
         button.textContent = "Download again";
-        button.setAttribute("aria-label", "Download part " + n + " again");
+        button.setAttribute("aria-label", "Download part " + thousands(n) + " again");
       } else if (state === "failed") {
         button.textContent = "Try again";
-        button.setAttribute("aria-label", "Try part " + n + " again");
+        button.setAttribute("aria-label", "Try part " + thousands(n) + " again");
       } else {
         button.textContent = "Download";
-        button.setAttribute("aria-label", "Download part " + n);
+        button.setAttribute("aria-label", "Download part " + thousands(n));
       }
       button.disabled = busy;
       setLoading(button, state === "generating");
@@ -598,9 +602,9 @@
     buildPartList(current);
     var done = downloadedCount(current);
     showParts(current, done ?
-      "Continuing this batch: " + done + " of " + current.parts + " parts were downloaded " +
-        "before. Download the remaining parts one by one." :
-      "This order has " + current.parts + " parts. Download them one by " +
+      "Continuing this batch: " + thousands(done) + " of " + thousands(current.parts) +
+        " parts were downloaded before. Download the remaining parts one by one." :
+      "This order has " + thousands(current.parts) + " parts. Download them one by " +
         "one: each part is generated when you click its button.");
     byId("next-part").focus(); // the button that was clicked may be hidden now
   }
@@ -619,16 +623,17 @@
     var controller = new AbortController();
     var signal = controller.signal;
     var before = current.state[n] || "";
-    var ofAll = " of " + current.parts;
+    var num = thousands(n);
+    var ofAll = " of " + thousands(current.parts);
     current.controller = controller;
     current.state[n] = "generating";
-    showParts(current, "Generating part " + n + ofAll + "…");
+    showParts(current, "Generating part " + num + ofAll + "…");
 
     function handedOff() {
       current.state[n] = "downloaded";
       if (run !== current) return;
       byId("cancel").hidden = true; // nothing left to cancel, only the URL to revoke
-      byId("generating").textContent = "Part " + n + ofAll + " was handed to your browser.";
+      byId("generating").textContent = "Part " + num + ofAll + " was handed to your browser.";
     }
 
     function finished() {
@@ -636,8 +641,9 @@
       current.controller = null;
       var count = downloadedCount(current);
       showParts(current, count === current.parts ?
-        "Done: all " + current.parts + " parts were downloaded." :
-        "Part " + n + ofAll + " was downloaded. " + count + ofAll + " parts downloaded.");
+        "Done: all " + thousands(current.parts) + " parts were downloaded." :
+        "Part " + num + ofAll + " was downloaded. " + thousands(count) + ofAll +
+          " parts downloaded.");
     }
 
     fetchPart(current, n, signal).then(function (response) {
@@ -653,16 +659,16 @@
         run = null;
       } else if (signal.aborted) {
         current.state[n] = before === "downloaded" ? before : "cancelled";
-        showParts(current, "Cancelled: part " + n + ofAll + " was not downloaded" +
+        showParts(current, "Cancelled: part " + num + ofAll + " was not downloaded" +
           (before === "downloaded" ? " again." : "."));
       } else if (reason && reason.failure && reason.table) {
         run = null;
         showValidationTable(reason.table);
-        setProgress(false, "Stopped at part " + n + ofAll + ": the file did not pass validation.", "",
+        setProgress(false, "Stopped at part " + num + ofAll + ": the file did not pass validation.", "",
           current);
       } else {
         current.state[n] = before === "downloaded" ? before : "failed";
-        showParts(current, "Part " + n + ofAll + " failed. " + whyFailed(reason, current));
+        showParts(current, "Part " + num + ofAll + " failed. " + whyFailed(reason, current));
       }
     });
   }
@@ -1102,9 +1108,9 @@
   });
 
   function formatSize(bytes) {
-    if (bytes < 1024) return bytes + " bytes";
-    if (bytes < 1024 * 1024) return Math.round(bytes / 1024) + " KB";
-    return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+    if (bytes < 1024) return thousands(bytes) + " bytes";
+    if (bytes < 1024 * 1024) return thousands(Math.round(bytes / 1024)) + " KB";
+    return thousands((bytes / (1024 * 1024)).toFixed(1)) + " MB";
   }
 
   // Show the chosen data file's name and size in the drop zone; back to step 1.

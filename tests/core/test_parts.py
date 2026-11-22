@@ -63,7 +63,7 @@ def test_ten_thousand_rows_parse_and_validate() -> None:
 
 
 def test_ten_thousand_and_one_rows_is_a_parse_error() -> None:
-    with pytest.raises(ParseError, match="10000"):
+    with pytest.raises(ParseError, match="10,000"):
         pipeline.check_upload(synthetic_csv(parser.MAX_ROWS + 1), "big.csv")
 
 

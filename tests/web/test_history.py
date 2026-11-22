@@ -168,7 +168,7 @@ def test_columns(world: World, member: TestClient) -> None:
     html = squash(member.get("/history?from_date=01/07/2026&to_date=01/07/2026").text)
     assert (
         '<td class="muted">01/07/2026 09:05</td> <td>member@alpha.test</td>'
-        ' <td class="file-name">big_order.xlsx</td> <td class="num">10000</td>'
+        ' <td class="file-name">big_order.xlsx</td> <td class="num">10,000</td>'
         ' <td class="num">7 / 20</td> <td class="num">3</td>'
         ' <td><span class="badge badge-warning">Incomplete: 7 / 20 parts</span></td>'
     ) in html

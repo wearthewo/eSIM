@@ -50,6 +50,27 @@ Always use the project venv, never the `python` on PATH.
 .venv\Scripts\python.exe -m uvicorn app.web.main:app --reload
 ```
 
+### End-to-end test
+
+`tests/e2e/test_journey.py` drives the whole product in Chromium (Playwright), in eleven
+steps: bootstrap and forced 2FA, legal pages, request access and approval, uploads and
+part downloads, continuing a batch, voiding, team invites, the daily quota, password
+resets, optional 2FA, disabling an organization and recovery codes. The default run leaves
+it out. Run it on its own (about 2 minutes, needs `TEST_DATABASE_URL`):
+
+```
+.venv\Scripts\python.exe -m playwright install chromium   # once
+.venv\Scripts\python.exe -m pytest -m e2e
+```
+
+It empties the TEST database, starts uvicorn on a free local port with production-like
+settings (plain http, development cookies) and an in-memory mailer, and reads the emails
+the app sends. Every person has their own browser context. Any console error or CSP
+violation that a step did not declare fails the test. ZIPs are checked in memory and
+downloads are refused, so no PDF is written. Screenshots go to `output/e2e/` and timings
+to `output/e2e/timings.txt`. Part of step 9 waits for a new 30-second 2FA code, because
+a code is accepted only once.
+
 ## Database (local development)
 
 Phase 2 (accounts, organizations, quotas) uses PostgreSQL 14 or newer. The

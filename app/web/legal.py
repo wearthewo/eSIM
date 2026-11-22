@@ -27,6 +27,7 @@ from app.auth.accounts import LINK_TTL, RESET_LINK_TTL, SESSION_ABSOLUTE_TTL, SE
 from app.auth.retention import ACCESS_REQUEST_TTL, AUDIT_LOG_TTL, SPENT_LINK_TTL
 from app.auth.tokens import FORM_TOKEN_MAX_AGE_SECONDS, MFA_STATE_MAX_AGE_SECONDS
 from app.batches import DUPLICATE_WINDOW, STALE_AFTER
+from app.core.numbers import thousands
 from app.db.ip import IPV4_PREFIX_LEN, IPV6_PREFIX_LEN
 from app.db.models import DEFAULT_DAILY_ROW_QUOTA
 from app.emails import SITE_NAME
@@ -45,7 +46,7 @@ router = APIRouter()
 
 
 def _plural(n: int, unit: str) -> str:
-    return f"{n} {unit}" if n == 1 else f"{n} {unit}s"
+    return f"{thousands(n)} {unit}" if n == 1 else f"{thousands(n)} {unit}s"
 
 
 def duration(value: dt.timedelta) -> str:

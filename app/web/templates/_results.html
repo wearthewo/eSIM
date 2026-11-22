@@ -12,16 +12,16 @@
     {% if not report.ok %}<p class="results-status is-blocked">Some rows have errors</p>
     {% elif n_warnings %}<p class="results-status is-ok">Ready, with warnings to review</p>
     {% else %}<p class="results-status is-ok">All rows passed the check</p>{% endif %}
-    {% if n_errors %}<span class="badge badge-error">{{ n_errors }} error{{ "" if n_errors == 1 else "s" }}</span>{% endif %}
-    {% if n_warnings %}<span class="badge badge-warning">{{ n_warnings }} warning{{ "" if n_warnings == 1 else "s" }}</span>{% endif %}
-    <p class="summary">{{ results.row_count }} row{{ "" if results.row_count == 1 else "s" }} read: {{ n_errors }} error{{ "" if n_errors == 1 else "s" }}, {{ n_warnings }} warning{{ "" if n_warnings == 1 else "s" }}.</p>
+    {% if n_errors %}<span class="badge badge-error">{{ n_errors | thousands }} error{{ "" if n_errors == 1 else "s" }}</span>{% endif %}
+    {% if n_warnings %}<span class="badge badge-warning">{{ n_warnings | thousands }} warning{{ "" if n_warnings == 1 else "s" }}</span>{% endif %}
+    <p class="summary">{{ results.row_count | thousands }} row{{ "" if results.row_count == 1 else "s" }} read: {{ n_errors | thousands }} error{{ "" if n_errors == 1 else "s" }}, {{ n_warnings | thousands }} warning{{ "" if n_warnings == 1 else "s" }}.</p>
   </div>
   {% if results.used %}
   {# Rows generated before by other batches of the organization, by earlier batch (largest first). #}
   {% set used = results.used %}
   <div class="alert alert-error used-before" id="used-before"><div>
-    <p><strong>{{ used.rows }} row{{ " was" if used.rows == 1 else "s were" }} already used in earlier batches:</strong>
-    {% for group in used.groups %}'{{ group.file_name }}' on {{ group.when }} ({{ group.rows }} row{{ "" if group.rows == 1 else "s" }}){{ ", " if not loop.last }}{% endfor %}{% if used.more %}, and others{% endif %}.</p>
+    <p><strong>{{ used.rows | thousands }} row{{ " was" if used.rows == 1 else "s were" }} already used in earlier batches:</strong>
+    {% for group in used.groups %}'{{ group.file_name }}' on {{ group.when }} ({{ group.rows | thousands }} row{{ "" if group.rows == 1 else "s" }}){{ ", " if not loop.last }}{% endfor %}{% if used.more %}, and others{% endif %}.</p>
     <p>Remove those rows and upload again.</p>
   </div></div>
   {% endif %}
@@ -31,13 +31,13 @@
     <thead><tr><th>Row</th><th>Field</th><th>Message</th><th>Severity</th></tr></thead>
     <tbody>
     {% for issue in report.issues[:max_issues_shown] %}
-      <tr class="{{ issue.severity }}"><td>{{ issue.row_number }}</td><td>{{ issue.field }}</td><td>{{ issue.message }}</td><td>{{ issue.severity }}</td></tr>
+      <tr class="{{ issue.severity }}"><td>{{ issue.row_number | thousands }}</td><td>{{ issue.field }}</td><td>{{ issue.message }}</td><td>{{ issue.severity }}</td></tr>
     {% endfor %}
     </tbody>
   </table>
   </div>
   {% if n_issues > max_issues_shown %}
-  <p class="hint">Showing the first {{ max_issues_shown }} of {{ n_issues }} problems.</p>
+  <p class="hint">Showing the first {{ max_issues_shown | thousands }} of {{ n_issues | thousands }} problems.</p>
   {% endif %}
   {% endif %}
   {% if report.ok %}
@@ -45,11 +45,11 @@
   {% if cont %}
   {# The file is an unfinished batch's own file: continue it instead of failing. #}
   <div class="alert alert-info continue-note" id="continue-batch"><div>
-    <p><strong>This file matches your unfinished batch '{{ cont.file_name }}' from {{ cont.when }} ({{ cont.parts_downloaded }} / {{ cont.parts }} parts downloaded).</strong></p>
+    <p><strong>This file matches your unfinished batch '{{ cont.file_name }}' from {{ cont.when }} ({{ cont.parts_downloaded | thousands }} / {{ cont.parts | thousands }} parts downloaded).</strong></p>
     <p>Continue it to download the remaining parts. Parts already downloaded are marked and can be downloaded again.</p>
   </div></div>
   {% elif results.parts > 1 %}
-  <p class="alert alert-info parts-note">This order is generated in {{ results.parts }} parts of up to {{ results.chunk_rows }} rows, one ZIP file per part. In Chrome and Edge you can choose a folder, and each part is saved there as soon as it is ready. Otherwise you download the parts one by one, each with its own button.</p>
+  <p class="alert alert-info parts-note">This order is generated in {{ results.parts | thousands }} parts of up to {{ results.chunk_rows | thousands }} rows, one ZIP file per part. In Chrome and Edge you can choose a folder, and each part is saved there as soon as it is ready. Otherwise you download the parts one by one, each with its own button.</p>
   {% endif %}
   {# data-rows and data-chunk-rows label the parts list ("Part 3 - rows 1,001-1,500"). #}
   <div class="results-actions" data-rows="{{ results.row_count }}" data-chunk-rows="{{ results.chunk_rows }}">
@@ -59,7 +59,7 @@
   {# data-downloaded: parts in batch_parts; app.js opens the parts list with them marked. #}
   <button type="submit" id="download" data-parts="{{ results.parts }}" data-downloaded="{{ cont.downloaded | join(',') }}">Continue this batch</button>
   {% else %}
-  <button type="submit" id="download" data-parts="{{ results.parts }}">Download {{ "ZIP" if results.parts == 1 else results.parts ~ " ZIP files" }}</button>
+  <button type="submit" id="download" data-parts="{{ results.parts }}">Download {{ "ZIP" if results.parts == 1 else (results.parts | thousands) ~ " ZIP files" }}</button>
   {% endif %}
   </div>
   {% else %}

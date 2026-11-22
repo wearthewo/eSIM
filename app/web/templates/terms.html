@@ -23,7 +23,7 @@
   <p>You are responsible for the files you upload: that the data is correct, that you may use it, the activation codes in it, and your dealings with your own customers. We process the data in your files only to make your PDFs, on your behalf, as described in the <a href="/privacy">Privacy Policy</a>. Check the PDFs before you send them.</p>
 
   <h2>Limits</h2>
-  <p>Each organization can generate up to <span data-limit="daily_quota">{{ "{:,}".format(daily_quota) }}</span> rows per day unless we agree otherwise. The limit resets every day at midnight UTC. One upload can have up to <span data-limit="max_rows">{{ "{:,}".format(max_rows) }}</span> rows and be up to <span data-limit="max_upload_mb">{{ max_upload_mb }}</span> MB.</p>
+  <p>Each organization can generate up to <span data-limit="daily_quota">{{ daily_quota | thousands }}</span> rows per day unless we agree otherwise. The limit resets every day at midnight UTC. One upload can have up to <span data-limit="max_rows">{{ max_rows | thousands }}</span> rows and be up to <span data-limit="max_upload_mb">{{ max_upload_mb | thousands }}</span> MB.</p>
 
   <h2>Provided as is</h2>
   <p>We work to keep the service correct and available, but we provide it as is, without guarantees. We do not promise that it will always be available or free of errors, including in the PDFs and the duplicate check. Maintenance may interrupt it.</p>

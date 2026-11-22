@@ -407,11 +407,11 @@ def test_summary_of_a_large_reupload(
     response, batch_id = validate(client, "orders.csv", data)
     html = response.text
     assert batch_id is None and 'id="download"' not in html
-    assert "10000 rows read: 7000 errors, 0 warnings." in html
+    assert "10,000 rows read: 7,000 errors, 0 warnings." in html
     groups = ", ".join(
-        f"'{name}' on {format_athens(when)} ({size} rows)" for name, size, when in expected[:5]
+        f"'{name}' on {format_athens(when)} ({size:,} rows)" for name, size, when in expected[:5]
     )
-    summary = f"<strong>3500 rows were already used in earlier batches:</strong> {groups}"
+    summary = f"<strong>3,500 rows were already used in earlier batches:</strong> {groups}"
     assert f"{summary}, and others.</p>" in squash(html)
     assert "earlier_6.csv" not in html.split("</strong>", 1)[1].split("</p>", 1)[0]
     assert html.count('<tr class="error">') == routes.MAX_ISSUES_SHOWN

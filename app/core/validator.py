@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 
 from app.core.models import EsimRecord, Severity, ValidationIssue, ValidationReport
+from app.core.numbers import thousands
 
 LPA_PREFIX = "LPA:1$"
 TELECOM_PREFIX = "89"
@@ -208,7 +209,7 @@ def find_duplicates(records: list[EsimRecord]) -> list[ValidationIssue]:
                         row_number=row,
                         field="iccid",
                         code="duplicate_iccid",
-                        message=f"Duplicate ICCID; first seen in row {first}.",
+                        message=f"Duplicate ICCID; first seen in row {thousands(first)}.",
                     )
                 )
         if rec.activation_code:
@@ -219,7 +220,9 @@ def find_duplicates(records: list[EsimRecord]) -> list[ValidationIssue]:
                         row_number=row,
                         field="activation_code",
                         code="duplicate_activation_code",
-                        message=f"Duplicate activation code; first seen in row {first}.",
+                        message=(
+                            f"Duplicate activation code; first seen in row {thousands(first)}."
+                        ),
                     )
                 )
     return issues

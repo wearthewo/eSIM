@@ -27,6 +27,7 @@ from app import emails
 from app.auth import access, accounts
 from app.auth.access import RequestFields
 from app.auth.accounts import AdminError, IpPrefix
+from app.core.numbers import thousands
 from app.db.models import MAX_EMAIL_CHARS, MAX_NAME_CHARS, MAX_NOTE_CHARS, VolumeBand
 from app.mail import AuditContext, deliver
 from app.settings import Settings
@@ -54,11 +55,11 @@ VOLUME_LABELS: dict[VolumeBand, str] = {
     VolumeBand.OVER_100K: "Over 100,000",
 }
 
-MSG_COMPANY = f"Enter your company name (at most {MAX_NAME_CHARS} characters)."
-MSG_NAME = f"Enter your name (at most {MAX_NAME_CHARS} characters)."
+MSG_COMPANY = f"Enter your company name (at most {thousands(MAX_NAME_CHARS)} characters)."
+MSG_NAME = f"Enter your name (at most {thousands(MAX_NAME_CHARS)} characters)."
 MSG_EMAIL = "Enter a valid work email address."
 MSG_VOLUME = "Choose your expected monthly volume."
-MSG_NOTE = f"The note can be at most {MAX_NOTE_CHARS} characters."
+MSG_NOTE = f"The note can be at most {thousands(MAX_NOTE_CHARS)} characters."
 MSG_CONTROL = "Remove control characters from the form."
 
 FIELDS = ("company_name", "contact_name", "email", "volume_band", "note")

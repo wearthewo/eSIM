@@ -84,9 +84,9 @@ def _expected(settings: Settings) -> dict[str, dt.timedelta]:
 
 def _parse(text: str) -> dt.timedelta:
     """ "30 minutes", "1 hour", "7 days", "12 months" back into a timedelta."""
-    match = re.fullmatch(r"(\d+) (minute|hour|day|month)s?", text)
+    match = re.fullmatch(r"(\d{1,3}(?:,\d{3})*) (minute|hour|day|month)s?", text)
     assert match, f"not a period: {text!r}"
-    n, unit = int(match.group(1)), match.group(2)
+    n, unit = int(match.group(1).replace(",", "")), match.group(2)
     if unit == "month":
         assert n % 12 == 0, f"{text!r}: months are only used for whole years"
         return dt.timedelta(days=365 * n // 12)

@@ -258,7 +258,8 @@ def test_index_renders(client: TestClient) -> None:
     for hidden in ("client_stamp", "part", "parts"):
         assert f'type="hidden" name="{hidden}"' in html
     assert "download_token" not in html
-    assert "10000 rows" in html and "parts of 500" in html
+    assert "10,000 rows" in html and "parts of 500" in html
+    assert "10000" not in html
     assert 'id="download"' not in html  # only after a successful validation
 
 
@@ -1392,7 +1393,7 @@ def test_validate_ten_thousand_rows_reports_twenty_parts(client: TestClient) -> 
     response = client.post("/validate", files=_csv_file("big.csv", data))
     assert response.status_code == 200
     html = response.text
-    assert "10000 rows read: 0 errors, 0 warnings." in html
+    assert "10,000 rows read: 0 errors, 0 warnings." in html
     assert "20 parts" in html
     assert re.search(r'<button type="submit" id="download" data-parts="20">', html)
     assert "Download 20 ZIP files" in html
@@ -1409,14 +1410,14 @@ def test_validate_single_part_file(client: TestClient, fixture_bytes) -> None:
 @pytest.mark.parametrize(("rows", "parts"), [(500, 1), (501, 2), (1000, 2), (1001, 3)])
 def test_validate_part_count(client: TestClient, rows: int, parts: int) -> None:
     html = client.post("/validate", files=_csv_file("v.csv", synthetic_csv(rows))).text
-    assert f"{rows} rows read: 0 errors" in html
+    assert f"{rows:,} rows read: 0 errors" in html
     assert f'data-parts="{parts}"' in html
 
 
 def test_validate_too_many_rows(client: TestClient, too_many_rows_csv: bytes) -> None:
     response = client.post("/validate", files=_csv_file("big.csv", too_many_rows_csv))
     assert response.status_code == 200
-    assert "Too many rows: the limit is 10000" in response.text
+    assert "Too many rows: the limit is 10,000 data rows per upload." in response.text
     assert 'id="download"' not in response.text
 
 
@@ -1425,9 +1426,9 @@ def test_validate_finds_duplicates_across_the_whole_file(client: TestClient) -> 
     lines[9000] = lines[1]  # row 9001 repeats row 2
     data = ("\n".join(lines) + "\n").encode()
     html = client.post("/validate", files=_csv_file("dup.csv", data)).text
-    assert "10000 rows read: 2 errors, 0 warnings." in html
+    assert "10,000 rows read: 2 errors, 0 warnings." in html
     assert (
-        '<tr class="error"><td>9001</td><td>iccid</td><td>Duplicate ICCID; first seen in row 2.'
+        '<tr class="error"><td>9,001</td><td>iccid</td><td>Duplicate ICCID; first seen in row 2.'
         in html
     )
     assert 'id="download"' not in html

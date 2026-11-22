@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 
 from app.auth import accounts
 from app.auth.accounts import AdminError, CurrentUser, IpPrefix
+from app.core.numbers import thousands
 from app.db.models import (
     AuditOutcome,
     Organization,
@@ -34,6 +35,7 @@ from app.db.models import (
 )
 
 MAX_DAILY_ROW_QUOTA = 10_000_000
+MSG_BAD_QUOTA = f"The quota must be a whole number from 0 to {thousands(MAX_DAILY_ROW_QUOTA)}."
 
 # audit_log.action values
 INVITE_CREATED = "invite_created"
@@ -284,10 +286,10 @@ def parse_quota(raw: str) -> int:
     """A daily row quota from a form field. Raises ``AdminError``."""
     value = raw.strip()
     if not value.isascii() or not value.isdigit() or len(value) > 9:
-        raise AdminError(f"The quota must be a whole number from 0 to {MAX_DAILY_ROW_QUOTA:,}.")
+        raise AdminError(MSG_BAD_QUOTA)
     quota = int(value)
     if quota > MAX_DAILY_ROW_QUOTA:
-        raise AdminError(f"The quota must be a whole number from 0 to {MAX_DAILY_ROW_QUOTA:,}.")
+        raise AdminError(MSG_BAD_QUOTA)
     return quota
 
 

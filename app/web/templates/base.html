@@ -30,7 +30,7 @@
         {% if current_user.role == "owner" and current_user.organization_id %}<a class="nav-link"{% if path.startswith("/team") %} aria-current="page"{% endif %} href="/team">Team</a>{% endif %}
         {% if current_user.is_superadmin %}
         <a class="nav-link"{% if path.startswith("/admin/orgs") %} aria-current="page"{% endif %} href="/admin/orgs">Admin</a>
-        <a class="nav-link{% if pending_requests %} has-pending{% endif %}"{% if path.startswith("/admin/requests") %} aria-current="page"{% endif %} href="/admin/requests">Requests ({{ pending_requests }})</a>
+        <a class="nav-link{% if pending_requests %} has-pending{% endif %}"{% if path.startswith("/admin/requests") %} aria-current="page"{% endif %} href="/admin/requests">Requests ({{ pending_requests | thousands }})</a>
         {% endif %}
         <a class="nav-link"{% if path.startswith("/account/2fa") %} aria-current="page"{% endif %} href="/account/2fa">Two-factor</a>
       </nav>

@@ -14,7 +14,7 @@
       newest first. Times are Greek time.
     </p>
     {% if today_usage %}
-    <p class="today-usage">Today: {{ "{:,}".format(today_usage.used) }} / {{ "{:,}".format(today_usage.quota) }} rows</p>
+    <p class="today-usage">Today: {{ today_usage.used | thousands }} / {{ today_usage.quota | thousands }} rows</p>
     {% endif %}
   </div>
 </div>
@@ -70,7 +70,7 @@
 <section class="card" aria-labelledby="batches-title">
   <h2 id="batches-title" class="visually-hidden">Batches</h2>
   {% if result.rows %}
-  <p class="summary history-count">{{ result.total }} batch{{ "" if result.total == 1 else "es" }}{% if result.pages > 1 %} · page {{ result.page }} of {{ result.pages }}{% endif %}</p>
+  <p class="summary history-count">{{ result.total | thousands }} batch{{ "" if result.total == 1 else "es" }}{% if result.pages > 1 %} · page {{ result.page | thousands }} of {{ result.pages | thousands }}{% endif %}</p>
   <div class="table-wrap" tabindex="0" role="region" aria-label="Batches">
   <table class="admin-table history-table">
     <thead>
@@ -93,10 +93,10 @@
         {% if is_admin %}<td>{{ b.organization_name }}</td>{% endif %}
         <td>{{ b.user_email or "—" }}</td>
         <td class="file-name">{{ b.file_name }}</td>
-        <td class="num">{{ b.row_count }}</td>
-        <td class="num">{{ b.parts_downloaded }} / {{ b.parts }}</td>
-        <td class="num">{{ b.warning_count }}</td>
-        <td><span class="badge {{ status_badges[b.status.value] }}">{{ status_labels[b.status.value] }}{% if b.status.value == "incomplete" %}: {{ b.parts_downloaded }} / {{ b.parts }} parts{% endif %}</span>{% if b.voided %}<span class="voided-note">Voided by {{ b.voided_by_email or "a deleted user" }} on {{ b.voided_at | athens }}</span>{% endif %}</td>
+        <td class="num">{{ b.row_count | thousands }}</td>
+        <td class="num">{{ b.parts_downloaded | thousands }} / {{ b.parts | thousands }}</td>
+        <td class="num">{{ b.warning_count | thousands }}</td>
+        <td><span class="badge {{ status_badges[b.status.value] }}">{{ status_labels[b.status.value] }}{% if b.status.value == "incomplete" %}: {{ b.parts_downloaded | thousands }} / {{ b.parts | thousands }} parts{% endif %}</span>{% if b.voided %}<span class="voided-note">Voided by {{ b.voided_by_email or "a deleted user" }} on {{ b.voided_at | athens }}</span>{% endif %}</td>
         {% if can_void %}<td class="actions">{% if not b.voided %}<a class="btn btn-sm btn-danger" href="/history/batches/{{ b.id }}/void">Void batch</a>{% endif %}</td>{% endif %}
       </tr>
       {% endfor %}
@@ -109,7 +109,7 @@
     {% for name, value in fields.items() %}<input type="hidden" name="{{ name }}" value="{{ value }}">{% endfor %}
     {% if is_admin %}<input type="hidden" name="org" value="{{ org }}">{% endif %}
     <button type="submit" class="btn btn-sm" name="page" value="{{ result.page - 1 }}"{% if result.page <= 1 %} disabled{% endif %}>Previous</button>
-    <span class="muted">Page {{ result.page }} of {{ result.pages }}</span>
+    <span class="muted">Page {{ result.page | thousands }} of {{ result.pages | thousands }}</span>
     <button type="submit" class="btn btn-sm" name="page" value="{{ result.page + 1 }}"{% if result.page >= result.pages %} disabled{% endif %}>Next</button>
   </form>
   {% endif %}

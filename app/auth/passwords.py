@@ -15,12 +15,14 @@ from functools import lru_cache
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError
 
+from app.core.numbers import thousands
+
 MIN_PASSWORD_CHARS = 12
 MAX_PASSWORD_CHARS = 128
 MAX_CONCURRENT_HASHES = 2
 
-MSG_TOO_SHORT = f"The password must be at least {MIN_PASSWORD_CHARS} characters."
-MSG_TOO_LONG = f"The password can be at most {MAX_PASSWORD_CHARS} characters."
+MSG_TOO_SHORT = f"The password must be at least {thousands(MIN_PASSWORD_CHARS)} characters."
+MSG_TOO_LONG = f"The password can be at most {thousands(MAX_PASSWORD_CHARS)} characters."
 MSG_IS_EMAIL = "The password must not be your email address."
 
 _hasher = PasswordHasher()

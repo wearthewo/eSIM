@@ -4,13 +4,13 @@
   <div>
     <h1>Create eSIM PDFs</h1>
     <p class="lead">
-      Upload a CSV or XLSX file of eSIM activation codes (up to {{ max_rows }} rows,
-      {{ max_upload_mb }} MB). Each row becomes a branded PDF with a QR code, and you
-      download them as a ZIP file. Orders over {{ chunk_rows }} rows are generated in
-      parts of {{ chunk_rows }} rows, one ZIP file per part.
+      Upload a CSV or XLSX file of eSIM activation codes (up to {{ max_rows | thousands }} rows,
+      {{ max_upload_mb | thousands }} MB). Each row becomes a branded PDF with a QR code, and you
+      download them as a ZIP file. Orders over {{ chunk_rows | thousands }} rows are generated in
+      parts of {{ chunk_rows | thousands }} rows, one ZIP file per part.
     </p>
     {% if today_usage %}
-    <p class="today-usage">Today: {{ "{:,}".format(today_usage.used) }} / {{ "{:,}".format(today_usage.quota) }} rows</p>
+    <p class="today-usage">Today: {{ today_usage.used | thousands }} / {{ today_usage.quota | thousands }} rows</p>
     {% endif %}
   </div>
   {% if not no_organization %}
@@ -39,14 +39,14 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" focusable="false"><path d="M12 16V4"/><path d="m7 9 5-5 5 5"/><path d="M20 16v2a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-2"/></svg>
         </span>
         <label for="file">Drop your CSV or XLSX file here, or <span class="browse">browse</span></label>
-        <p class="dropzone-meta" id="file-limits">CSV or XLSX file (max {{ max_upload_mb }} MB, up to {{ max_rows }} rows)</p>
+        <p class="dropzone-meta" id="file-limits">CSV or XLSX file (max {{ max_upload_mb | thousands }} MB, up to {{ max_rows | thousands }} rows)</p>
         <input id="file" class="dropzone-input" type="file" name="file" accept=".csv,.xlsx" required
                aria-describedby="file-limits file-name"
                hx-post="/validate" hx-trigger="change" hx-params="file"
                hx-encoding="multipart/form-data" hx-target="#results"
                hx-indicator="#checking"
                data-max-bytes="{{ max_upload_bytes }}"
-               data-too-large="The data file is larger than {{ max_upload_mb }} MB.">
+               data-too-large="The data file is larger than {{ max_upload_mb | thousands }} MB.">
         <p class="dropzone-file" id="file-name"></p>
       </div>
       <span id="checking" class="htmx-indicator checking" role="status"><span class="spinner" aria-hidden="true"></span>Checking file&hellip;</span>
@@ -73,8 +73,8 @@
         <label for="logo">Logo <span class="optional">(optional)</span></label>
         <input id="logo" type="file" name="logo" accept="image/png,image/jpeg" aria-describedby="logo-hint"
                data-max-bytes="{{ max_logo_bytes }}"
-               data-too-large="The logo is larger than {{ max_logo_kb }} KB.">
-        <p class="hint" id="logo-hint">PNG or JPEG, max {{ max_logo_kb }} KB.</p>
+               data-too-large="The logo is larger than {{ max_logo_kb | thousands }} KB.">
+        <p class="hint" id="logo-hint">PNG or JPEG, max {{ max_logo_kb | thousands }} KB.</p>
       </div>
 
       <div class="field">
@@ -145,7 +145,7 @@
         disk, logged or saved in the database. While an order is downloading, its checked
         rows are kept only in the server's memory (never on disk or in the database), so
         the parts can be made without sending the file again. They are deleted as soon as
-        the order is complete, and at the latest {{ cache_minutes }} minutes after they
+        the order is complete, and at the latest {{ cache_minutes | thousands }} minutes after they
         were last used. History keeps only the file name, counts and keyed fingerprints
         that recognise codes already used.
       </p>
