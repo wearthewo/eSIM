@@ -9,7 +9,7 @@ codes, checked row by row before anything is generated.**
 
 ![Upload a file, fix the errors it finds, brand the PDFs and download the ZIP](docs/images/demo.gif)
 
-- **Live site:** [app.esimsheet.com](https://app.esimsheet.com) (coming soon, invite-only)
+- **Live site:** [app.esimsheet.com](https://app.esimsheet.com) (invite-only)
 - **Demo video:** about 90 seconds, recorded with `scripts/demo_video.py` (see
   [Demo video](#demo-video))
 
@@ -902,9 +902,14 @@ render.yaml     Render Blueprint (database + web service, Frankfurt)
 - PDF language choice (the install steps are in English today).
 - Printable sheets: several eSIMs per page, for counters and events.
 
+## Reporting a vulnerability
+
+Please email support@esimsheet.com and do not open a public issue. See
+[SECURITY.md](SECURITY.md).
+
 ## Licence
 
-To be decided. Until a licence file is added, all rights are reserved.
+All rights reserved. See [LICENSE](LICENSE).
 
 ## Author
 
