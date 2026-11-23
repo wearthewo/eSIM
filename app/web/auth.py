@@ -75,7 +75,7 @@ from app.auth.tokens import (
 from app.db.ip import ip_prefix
 from app.db.models import AuditOutcome
 from app.settings import Settings
-from app.web.templating import templates
+from app.web.templating import NOTICE_PARAM, STILL_LOGGED_IN, templates
 
 SESSION_COOKIE = "esim_session"
 PREAUTH_COOKIE = "esim_preauth"
@@ -84,6 +84,7 @@ CSRF_HEADER = "X-CSRF-Token"
 CSRF_FIELD = "csrf_token"
 FORM_TOKEN_FIELD = "form_token"  # noqa: S105  (a field name, not a secret)
 LOGIN_PATH = "/login"
+LOGOUT_PATH = "/logout"
 MFA_LOGIN_PATH = "/login/2fa"
 ENROLMENT_PATH = "/account/2fa"  # and below: what a superadmin without 2FA may reach
 SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
@@ -136,6 +137,16 @@ class FormTimedOut(CsrfFailed):
     ``CsrfFailed`` like any other."""
 
 
+class SessionCsrfFailed(CsrfFailed):
+    """A valid session, but the POST lacks that session's CSRF token (for example, the
+    page was loaded under a session since replaced in another tab). Only /logout catches
+    it; elsewhere it is a ``CsrfFailed`` like any other. Carries the session's user."""
+
+    def __init__(self, user: CurrentUser) -> None:
+        super().__init__()
+        self.user = user
+
+
 class FormTooLarge(AuthError):
     status_code = 413
 
@@ -148,7 +159,14 @@ class MfaEnrolmentRequired(AuthError):
 
 async def handle_auth_error(request: Request, exc: Exception) -> Response:
     """Not logged in: 303 to /login (htmx: 401 + HX-Redirect). A superadmin without 2FA:
-    303 to /account/2fa (htmx: 401 + HX-Redirect). Others: plain text."""
+    303 to /account/2fa (htmx: 401 + HX-Redirect). /logout with a valid session but not
+    its CSRF token: 303 to the user's home with a notice, still logged in. Others: plain
+    text."""
+    if isinstance(exc, SessionCsrfFailed) and request.url.path == LOGOUT_PATH:
+        # The page was out of date (its session replaced, say in another tab). Never log
+        # out without the token; a fresh page carries the current one.
+        location = f"{home_path(exc.user)}?{NOTICE_PARAM}={STILL_LOGGED_IN}"
+        return RedirectResponse(location, status_code=303, headers=NO_STORE)
     if isinstance(exc, MfaEnrolmentRequired):
         if request.headers.get("HX-Request") == "true":
             return Response(status_code=401, headers={"HX-Redirect": ENROLMENT_PATH, **NO_STORE})
@@ -311,11 +329,20 @@ def _resolve(sessions: sessionmaker[Session], token: str) -> tuple[CurrentUser |
 def _enrolment_allowed(request: Request) -> bool:
     """Paths a superadmin without two-factor authentication may still use."""
     path = request.url.path
-    return path == "/logout" or path == ENROLMENT_PATH or path.startswith(ENROLMENT_PATH + "/")
+    return path == LOGOUT_PATH or path == ENROLMENT_PATH or path.startswith(ENROLMENT_PATH + "/")
+
+
+def home_path(user: CurrentUser) -> str:
+    """Where the user lands: the upload page, or /account/2fa for a superadmin who must
+    turn two-factor authentication on first (everything else redirects there)."""
+    if user.is_superadmin and not user.mfa_enabled:
+        return ENROLMENT_PATH
+    return "/"
 
 
 async def require_user(request: Request) -> CurrentUser:
-    """The logged-in user; raises ``LoginRequired`` or (POST without CSRF token) ``CsrfFailed``.
+    """The logged-in user; raises ``LoginRequired`` or (POST without the session's CSRF
+    token) ``SessionCsrfFailed``.
 
     Sets ``request.state.user``, ``request.state.csrf_token`` and (superadmins)
     ``request.state.pending_requests`` for the templates. A superadmin without two-factor
@@ -336,7 +363,7 @@ async def require_user(request: Request) -> CurrentUser:
         ):
             submitted = (await read_small_form(request)).get(CSRF_FIELD)
         if not csrf_matches(submitted, user.csrf_token_hash):
-            raise CsrfFailed
+            raise SessionCsrfFailed(user)
     if user.is_superadmin and not user.mfa_enabled and not _enrolment_allowed(request):
         raise MfaEnrolmentRequired
     request.state.user = user
@@ -609,7 +636,7 @@ def _logout(
         )
 
 
-@router.post("/logout", response_model=None)
+@router.post(LOGOUT_PATH, response_model=None)
 async def logout(request: Request, user: Annotated[CurrentUser, Depends(require_user)]) -> Response:
     settings = _settings(request)
     token = request.cookies.get(cookie_name(settings, SESSION_COOKIE))

@@ -2,7 +2,8 @@
 
 Every template gets ``current_user`` and ``csrf_token`` (both ``None`` when not
 logged in) and ``pending_requests`` (superadmins only, else 0), set on
-``request.state`` by ``app.web.auth.require_user``.
+``request.state`` by ``app.web.auth.require_user``, and ``page_notice``: the text of
+``PAGE_NOTICES[?notice=]`` for a logged-in user, else ``None``.
 
 Autoescaping is on for every template (Starlette's ``Jinja2Templates`` default,
 checked by the tests). Templates never use ``|safe`` and never put user input in
@@ -24,11 +25,25 @@ from app.localtime import format_athens
 TEMPLATES_DIR: Path = Path(__file__).parent / "templates"
 
 
+NOTICE_PARAM = "notice"
+STILL_LOGGED_IN = "still-logged-in"
+# Notices a redirect can ask for with ``?notice=<key>``, shown at the top of any
+# logged-in page. Only these fixed texts: nothing from the URL itself reaches the page.
+PAGE_NOTICES: dict[str, str] = {
+    STILL_LOGGED_IN: (
+        "This page was out of date. You are still logged in — click Log out again to sign out."
+    ),
+}
+
+
 def _auth_context(request: Request) -> dict[str, Any]:
+    user = getattr(request.state, "user", None)
+    key = request.query_params.get(NOTICE_PARAM, "")
     return {
-        "current_user": getattr(request.state, "user", None),
+        "current_user": user,
         "csrf_token": getattr(request.state, "csrf_token", None),
         "pending_requests": getattr(request.state, "pending_requests", 0),
+        "page_notice": PAGE_NOTICES.get(key) if user is not None else None,
     }
 
 

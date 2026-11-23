@@ -44,6 +44,7 @@
     </div>
   </header>
   <main id="main" class="container">
+    {% if page_notice %}<p class="alert alert-info" role="status">{{ page_notice }}</p>{% endif %}
   {% else %}
   {# Logged out: a centred card under the product name. #}
   <main id="main" class="auth-shell">

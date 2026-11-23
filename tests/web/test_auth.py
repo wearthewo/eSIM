@@ -34,6 +34,7 @@ from app.web.auth import (
 )
 from app.web.main import SECURITY_HEADERS
 from app.web.team import require_owner
+from app.web.templating import NOTICE_PARAM, PAGE_NOTICES, STILL_LOGGED_IN
 from tests.web.conftest import (
     ANON_IP,
     EMAIL,
@@ -334,6 +335,131 @@ def test_logout(client: TestClient, logged_in: LoggedIn, accts: Accounts) -> Non
     assert stale.get("/").status_code == 303
 
 
+_PAGE_CSRF = re.compile(r'name="csrf_token" value="([^"]+)"')
+STILL_LOGGED_IN_URL = f"/?{NOTICE_PARAM}={STILL_LOGGED_IN}"
+STILL_LOGGED_IN_TEXT = PAGE_NOTICES[STILL_LOGGED_IN]
+
+
+def _page_csrf(html: str) -> str:
+    """The CSRF token in the page's "Log out" form."""
+    match = _PAGE_CSRF.search(html)
+    assert match, "no CSRF token on the page"
+    return match.group(1)
+
+
+@pytest.mark.parametrize("token", [None, "", "wrong", "other-session"])
+def test_logout_from_an_out_of_date_page_keeps_the_session_and_says_so(
+    logged_in: LoggedIn, accts: Accounts, token: str | None
+) -> None:
+    if token == "other-session":
+        token = csrf_for(accts.session(accts.user("other@org.test")))
+    c = logged_in.client(follow_redirects=False)
+    del c.headers[CSRF_HEADER]  # a plain form post
+    response = c.post("/logout", data={} if token is None else {"csrf_token": token})
+
+    # Not logged out: the session, its cookie and the audit log are untouched.
+    assert response.status_code == 303
+    assert response.headers["location"] == STILL_LOGGED_IN_URL
+    assert response.headers["cache-control"] == "no-store"
+    assert "set-cookie" not in response.headers
+    assert len(_sessions_of(accts, logged_in.user_id)) == 1
+    assert ("logout", "success", logged_in.user_id) not in [r[:3] for r in _audit(accts)]
+    # The home page says so, and its "Log out" carries the current token, which works.
+    home = c.get(response.headers["location"])
+    assert home.status_code == 200
+    assert f'<p class="alert alert-info" role="status">{STILL_LOGGED_IN_TEXT}</p>' in home.text
+    assert MSG_FORBIDDEN not in home.text
+    assert _page_csrf(home.text) == logged_in.csrf
+    out = c.post("/logout", data={"csrf_token": _page_csrf(home.text)})
+    assert out.status_code == 303 and out.headers["location"] == "/login"
+    assert _sessions_of(accts, logged_in.user_id) == []
+
+
+@pytest.mark.parametrize("session", ["none", "unknown", "deleted", "expired"])
+def test_logout_without_a_valid_session_goes_to_login(
+    browser: Browser, accts: Accounts, session: str
+) -> None:
+    user_id = accts.user()
+    c = browser()
+    token = accts.session(user_id)
+    if session == "unknown":
+        token = new_token()
+    elif session == "deleted":
+        accts.sql("DELETE FROM sessions RETURNING user_id")
+    elif session == "expired":
+        accts.sql("UPDATE sessions SET expires_at = now() - interval '1 second' RETURNING user_id")
+    if session != "none":
+        c.cookies.set(SESSION_COOKIE, token)
+    response = c.post("/logout", data={"csrf_token": csrf_for(token)})
+    assert response.status_code == 303
+    assert response.headers["location"] == "/login"
+    assert STILL_LOGGED_IN not in response.headers["location"]
+    assert accts.sql("SELECT count(*) FROM audit_log WHERE action = 'logout'") == [(0,)]
+
+
+def test_logout_from_a_tab_whose_session_was_replaced(browser: Browser, accts: Accounts) -> None:
+    """Tab A loads a page; tab B (same browser) logs in again, which replaces the session.
+    Tab A's "Log out" carries the old session's token: it must not log out, and must not
+    show the generic "This form has expired" page."""
+    user_id = accts.user()
+    c = browser()
+    assert _login(c).status_code == 303
+    first_session = c.cookies[SESSION_COOKIE]
+    tab_a = c.get("/")
+    old_csrf = _page_csrf(tab_a.text)
+    assert old_csrf == csrf_for(first_session)
+
+    assert _login(c).status_code == 303  # tab B: a new session replaces the first
+    second_session = c.cookies[SESSION_COOKIE]
+    assert second_session != first_session
+    assert len(_sessions_of(accts, user_id)) == 1
+
+    response = c.post("/logout", data={"csrf_token": old_csrf})  # tab A's form
+    assert response.status_code == 303
+    assert response.headers["location"] == STILL_LOGGED_IN_URL
+    assert c.cookies[SESSION_COOKIE] == second_session
+    assert len(_sessions_of(accts, user_id)) == 1
+    assert accts.sql("SELECT count(*) FROM audit_log WHERE action = 'logout'") == [(0,)]
+
+    home = c.get(response.headers["location"])
+    assert home.status_code == 200 and STILL_LOGGED_IN_TEXT in home.text
+    assert MSG_FORBIDDEN not in home.text
+    new_csrf = _page_csrf(home.text)
+    assert new_csrf == csrf_for(second_session)
+    out = c.post("/logout", data={"csrf_token": new_csrf})
+    assert out.status_code == 303 and out.headers["location"] == "/login"
+    assert _sessions_of(accts, user_id) == []
+
+
+def test_logout_out_of_date_for_superadmin_without_2fa_lands_on_enrolment(
+    web_app: FastAPI, accts: Accounts
+) -> None:
+    user_id = accts.user("platform.admin@org.test", superadmin=True, mfa=False)
+    admin = LoggedIn(web_app, user_id, accts.session(user_id))
+    c = admin.client(follow_redirects=False)
+    del c.headers[CSRF_HEADER]
+    response = c.post("/logout", data={"csrf_token": "wrong"})
+    assert response.status_code == 303
+    assert response.headers["location"] == f"/account/2fa?{NOTICE_PARAM}={STILL_LOGGED_IN}"
+    page = c.get(response.headers["location"])
+    assert page.status_code == 200 and STILL_LOGGED_IN_TEXT in page.text
+    assert len(_sessions_of(accts, user_id)) == 1
+
+
+def test_page_notice_shows_only_known_texts_to_logged_in_users(
+    client: TestClient, anon: TestClient
+) -> None:
+    for value in ("<b>planted</b>", "unknown", ""):
+        page = client.get("/", params={NOTICE_PARAM: value})
+        assert page.status_code == 200
+        assert 'class="alert alert-info" role="status"' not in page.text
+        assert "planted" not in page.text
+    assert STILL_LOGGED_IN_TEXT in client.get(STILL_LOGGED_IN_URL).text
+    # Logged out, the notice would be wrong ("You are still logged in"): never shown.
+    login = anon.get("/login", params={NOTICE_PARAM: STILL_LOGGED_IN})
+    assert login.status_code == 200 and STILL_LOGGED_IN_TEXT not in login.text
+
+
 def _login_with_cookie(c: TestClient, session_token: str):
     """Log in while the browser sends ``session_token`` as its session cookie."""
     form_token = _form_token(c.get("/login").text)
@@ -510,10 +636,16 @@ def test_csrf_required_on_every_post(
     headers = {} if token is None else {CSRF_HEADER: token}
     for path in _post_routes(web_app):
         multipart = c.post(path, headers=headers, files={"file": ("v.csv", b"iccid\n")})
+        form = c.post(path, headers=headers, data={"csrf_token": token or ""})
+        if path == "/logout":  # refused too, but back home with a notice (tests above)
+            for response in (multipart, form):
+                assert response.status_code == 303, path
+                assert response.headers["location"] == STILL_LOGGED_IN_URL
+            continue
         assert multipart.status_code == 403, path
         assert multipart.text == MSG_FORBIDDEN
-        form = c.post(path, headers=headers, data={"csrf_token": token or ""})
         assert form.status_code == 403, path
+        assert form.text == MSG_FORBIDDEN
     assert len(_sessions_of(accts, logged_in.user_id)) == 1  # logout did not happen
 
 
