@@ -24,14 +24,17 @@ from app.auth.accounts import RESET_MAX_PER_IP, RESET_MAX_PER_USER
 from app.db.models import Role, VolumeBand
 from app.mail import FakeMailer, Message
 from app.settings import Secret, Settings
-from app.web.auth import MSG_FORBIDDEN, SESSION_COOKIE
+from app.web.auth import MSG_FORBIDDEN, MSG_TIMED_OUT, SESSION_COOKIE
+from app.web.forgot import FORGOT_PURPOSE
 from tests.web.conftest import PASSWORD, Accounts, LoggedIn, now
 from tests.web.management_routes import (
     NEW_PASSWORD,
+    STALE_WAYS,
     audit_actions,
     count,
     form_token,
     link_token,
+    stale_form_token,
     use_link,
 )
 
@@ -350,6 +353,33 @@ def test_forgot_password_needs_its_form_token(
     other.get("/forgot-password")
     assert other.post("/forgot-password", data={**data, "form_token": token}).status_code == 403
     assert outbox.outbox == []
+
+
+@pytest.mark.parametrize("how", STALE_WAYS)
+def test_forgot_password_timed_out_form_is_shown_again(
+    mail_app: FastAPI, accts: Accounts, outbox, browser: Browser, how: str
+) -> None:
+    accts.user("owner@org.test")
+    c = browser(app=mail_app)
+    page = c.get("/forgot-password")
+    stale = stale_form_token(c, page.text, FORGOT_PURPOSE, how)
+    response = c.post("/forgot-password", data={"form_token": stale, "email": "owner@org.test"})
+
+    # Still refused: no link made or sent.
+    assert response.status_code == 403
+    assert outbox.outbox == []
+    assert count(accts, "password_tokens") == 0
+    # The same form again with the email kept.
+    assert response.headers["cache-control"] == "no-store"
+    assert MSG_TIMED_OUT in response.text and MSG_FORBIDDEN not in response.text
+    assert 'action="/forgot-password"' in response.text
+    assert 'value="owner@org.test"' in response.text
+    # Its fresh token works.
+    fresh = form_token(response.text)
+    assert fresh != stale
+    sent = c.post("/forgot-password", data={"form_token": fresh, "email": "owner@org.test"})
+    assert sent.status_code == 200 and SENT_PAGE in sent.text
+    assert [m.to for m in outbox.outbox] == ["owner@org.test"]
 
 
 def test_forgot_password_malformed_email(mail_app: FastAPI, outbox, browser: Browser) -> None:

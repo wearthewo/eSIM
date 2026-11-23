@@ -24,7 +24,13 @@ CSRF: every POST behind ``require_user`` needs the session's CSRF token, in the
 ``X-CSRF-Token`` header (htmx, app.js) or, for urlencoded forms, the
 ``csrf_token`` field. /login, /invite/<token> and /request-access have no session
 yet and use a signed form token tied to the pre-auth cookie instead
-(``app.auth.tokens``; ``form_page`` and ``check_form`` here).
+(``app.auth.tokens``; ``form_page`` and ``check_form`` here). A token we signed for the
+form that is only too old, or not this browser's (the pre-auth cookie expired or
+changed), raises ``FormTimedOut``: /login, /invite/<token>, /forgot-password and
+/request-access then show the form again with a fresh token and ``MSG_TIMED_OUT``,
+re-filling only the email (``typed_email``; /invite/<token> shows the link's own
+account). Such a post may come from another site, so no other submitted text is put
+back on the page, and never a password. The request itself is still refused.
 
 Never log passwords, tokens or emails. ``RedactInviteTokens`` keeps link tokens
 out of the uvicorn access log, and ``TruncateClientAddress`` writes only the client's
@@ -55,11 +61,12 @@ from app.auth.passwords import (
 from app.auth.tokens import (
     FORM_TOKEN_MAX_AGE_SECONDS,
     MFA_STATE_MAX_AGE_SECONDS,
-    check_form_token,
+    FormTokenStatus,
     check_mfa_state,
     csrf_for,
     csrf_matches,
     digest,
+    form_token_status,
     is_token_shaped,
     new_token,
     sign_form_token,
@@ -96,6 +103,7 @@ MSG_LINK_INVALID = (
 )
 MSG_PASSWORDS_DIFFER = "The two passwords do not match."
 MSG_FORBIDDEN = "This form has expired. Go back, reload the page and try again."
+MSG_TIMED_OUT = "Your session timed out. Please try again."
 MSG_BAD_FORM = "The form could not be read. Reload the page and try again."
 
 NO_STORE = {"Cache-Control": "no-store"}
@@ -120,6 +128,12 @@ class LoginRequired(AuthError):
 class CsrfFailed(AuthError):
     status_code = 403
     message = MSG_FORBIDDEN
+
+
+class FormTimedOut(CsrfFailed):
+    """A genuine form token that is too old or not this browser's. Routes that catch it
+    show the form again (403, fresh token, ``MSG_TIMED_OUT``); elsewhere it is a
+    ``CsrfFailed`` like any other."""
 
 
 class FormTooLarge(AuthError):
@@ -370,13 +384,22 @@ def form_page(
 
 
 def check_form(request: Request, purpose: str, form: dict[str, str]) -> str:
-    """The submitted form token if valid for ``purpose`` and this browser; else ``CsrfFailed``."""
+    """The submitted form token if valid for ``purpose`` and this browser. Raises
+    ``FormTimedOut`` for a token we signed for ``purpose`` that is too old or carries
+    another nonce than the pre-auth cookie (or there is no cookie); ``CsrfFailed`` for
+    anything else (missing, malformed, forged, another form's token)."""
     token = form.get(FORM_TOKEN_FIELD)
-    if token is None or not check_form_token(
-        _secret_key(request), purpose, token, _preauth_nonce(request)
-    ):
+    status = form_token_status(_secret_key(request), purpose, token, _preauth_nonce(request))
+    if status is FormTokenStatus.STALE:
+        raise FormTimedOut
+    if status is not FormTokenStatus.OK or token is None:
         raise CsrfFailed
     return token
+
+
+def typed_email(form: dict[str, str]) -> str:
+    """The email field as submitted, for showing the form again (never a password)."""
+    return form.get("email", "")[: accounts.MAX_EMAIL_CHARS]
 
 
 def _logged_in_redirect(request: Request, session_token: str) -> RedirectResponse:
@@ -398,13 +421,18 @@ def _login_page(
     error: str | None = None,
     status_code: int = 200,
     form_token: str | None = None,
+    email: str = "",
 ) -> HTMLResponse:
     return form_page(
         request,
         "login.html",
         LOGIN_PURPOSE,
         # "Forgot password?" (app/web/forgot.py) only exists when email is on.
-        {"error": error, "forgot_password": request.app.state.mailer is not None},
+        {
+            "error": error,
+            "email": email,
+            "forgot_password": request.app.state.mailer is not None,
+        },
         status_code=status_code,
         form_token=form_token,
     )
@@ -438,7 +466,10 @@ def _login(
 @router.post(LOGIN_PATH, response_model=None)
 async def login(request: Request) -> Response:
     form = await read_small_form(request)
-    form_token = check_form(request, LOGIN_PURPOSE, form)
+    try:
+        form_token = check_form(request, LOGIN_PURPOSE, form)
+    except FormTimedOut:  # refused; the same form again with a fresh token
+        return _login_page(request, error=MSG_TIMED_OUT, status_code=403, email=typed_email(form))
     old_token = request.cookies.get(cookie_name(_settings(request), SESSION_COOKIE))
     result = await run_in_threadpool(
         _login,
@@ -669,10 +700,16 @@ def _use_link(
 @router.post("/invite/{token}", response_model=None)
 async def set_password(request: Request, token: str) -> Response:
     form = await read_small_form(request)
-    form_token = check_form(request, _link_purpose(token), form)
+    form_token: str | None = None
+    try:
+        form_token = check_form(request, _link_purpose(token), form)
+    except FormTimedOut:  # refused; shown again below if the link is still usable
+        pass
     target = await run_in_threadpool(_find_link, sessions_of(request), token)
     if target is None:
         return _invalid_link(request)
+    if form_token is None:  # the account's email is on the page; the passwords are not kept
+        return _set_password_page(request, token, target, error=MSG_TIMED_OUT, status_code=403)
 
     password = form.get("password", "")
     error = (

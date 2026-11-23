@@ -32,12 +32,15 @@ from app.db.models import MAX_EMAIL_CHARS, MAX_NAME_CHARS, MAX_NOTE_CHARS, Volum
 from app.mail import AuditContext, deliver
 from app.settings import Settings
 from app.web.auth import (
+    MSG_TIMED_OUT,
     NO_STORE,
+    FormTimedOut,
     check_form,
     client_ip_prefix,
     form_page,
     read_small_form,
     sessions_of,
+    typed_email,
     utc_now,
 )
 from app.web.templating import templates
@@ -166,7 +169,12 @@ async def request_access_form(request: Request) -> HTMLResponse:
 @router.post(REQUEST_ACCESS_PATH, response_model=None)
 async def request_access(request: Request) -> Response:
     form = await read_small_form(request, max_bytes=MAX_REQUEST_FORM_BYTES)
-    form_token = check_form(request, REQUEST_ACCESS_PURPOSE, form)
+    try:
+        form_token = check_form(request, REQUEST_ACCESS_PURPOSE, form)
+    except FormTimedOut:  # refused; the same form again with a fresh token
+        # Only the email, as on /login: the post may come from another site (the pre-auth
+        # cookie is SameSite=Strict), which must not place its own text on our page.
+        return _form(request, {"email": typed_email(form)}, error=MSG_TIMED_OUT, status_code=403)
     if form.get(HONEYPOT_FIELD, ""):
         return _thank_you(request)
     try:

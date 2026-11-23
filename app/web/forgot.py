@@ -32,12 +32,15 @@ from app.auth import accounts
 from app.auth.accounts import RESET_LINK_TTL, AdminError, IpPrefix, ResetGrant
 from app.mail import AuditContext, deliver
 from app.web.auth import (
+    MSG_TIMED_OUT,
     NO_STORE,
+    FormTimedOut,
     check_form,
     client_ip_prefix,
     form_page,
     read_small_form,
     sessions_of,
+    typed_email,
     utc_now,
 )
 from app.web.templating import templates
@@ -105,7 +108,10 @@ async def forgot_form(request: Request) -> HTMLResponse:
 async def forgot(request: Request) -> Response:
     _require_email(request)
     form = await read_small_form(request)
-    form_token = check_form(request, FORGOT_PURPOSE, form)
+    try:
+        form_token = check_form(request, FORGOT_PURPOSE, form)
+    except FormTimedOut:  # refused; the same form again with a fresh token
+        return _form(request, email=typed_email(form), error=MSG_TIMED_OUT, status_code=403)
     raw = form.get("email", "")
     try:
         email = accounts.normalize_email(raw)

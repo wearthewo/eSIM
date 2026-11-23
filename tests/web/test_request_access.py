@@ -8,10 +8,18 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.auth.access import RATE_LIMIT
-from app.web.auth import MSG_FORBIDDEN, PREAUTH_COOKIE
-from app.web.public import MSG_COMPANY, MSG_CONTROL, MSG_EMAIL, MSG_NAME, MSG_NOTE, MSG_VOLUME
+from app.web.auth import MSG_FORBIDDEN, MSG_TIMED_OUT, PREAUTH_COOKIE
+from app.web.public import (
+    MSG_COMPANY,
+    MSG_CONTROL,
+    MSG_EMAIL,
+    MSG_NAME,
+    MSG_NOTE,
+    MSG_VOLUME,
+    REQUEST_ACCESS_PURPOSE,
+)
 from tests.web.conftest import Accounts
-from tests.web.management_routes import count, form_token
+from tests.web.management_routes import STALE_WAYS, count, form_token, stale_form_token
 
 Browser = Callable[..., TestClient]
 
@@ -82,6 +90,73 @@ def test_form_token_required(browser: Browser, accts: Accounts) -> None:
     other.get("/request-access")
     assert other.post("/request-access", data={**VALID, "form_token": token}).status_code == 403
     assert stored(accts) == []
+
+
+@pytest.mark.parametrize("how", STALE_WAYS)
+def test_timed_out_form_is_shown_again_with_only_the_email(
+    browser: Browser, accts: Accounts, how: str
+) -> None:
+    c = browser()
+    page = c.get("/request-access")
+    stale = stale_form_token(c, page.text, REQUEST_ACCESS_PURPOSE, how)
+    response = c.post("/request-access", data={"form_token": stale, **VALID})
+
+    # Still refused: nothing stored.
+    assert response.status_code == 403
+    assert stored(accts) == []
+    # The same form again, with only the email re-filled.
+    assert response.headers["cache-control"] == "no-store"
+    assert MSG_TIMED_OUT in response.text and MSG_FORBIDDEN not in response.text
+    assert f'autocomplete="email" value="{VALID["email"]}"' in response.text
+    assert 'autocomplete="organization" value=""' in response.text
+    assert 'autocomplete="name" value=""' in response.text
+    assert "selected" not in response.text
+    assert 'maxlength="2000"></textarea>' in response.text
+    for field in ("company_name", "contact_name", "note"):
+        assert VALID[field] not in response.text
+    # Its fresh token works.
+    fresh = form_token(response.text)
+    assert fresh != stale
+    done = c.post("/request-access", data={"form_token": fresh, **VALID})
+    assert done.status_code == 200 and "We have received your request" in done.text
+    assert len(stored(accts)) == 1
+
+
+def test_timed_out_cross_site_post_places_no_text_on_the_page(
+    browser: Browser, accts: Accounts
+) -> None:
+    """Another site's post never carries the SameSite=Strict pre-auth cookie, so it is
+    always timed out. Apart from the escaped email, none of its text reaches the page."""
+    c = browser()
+    page = c.get("/request-access")
+    stale = stale_form_token(c, page.text, REQUEST_ACCESS_PURPOSE, "cookie_gone")
+    planted = {
+        "company_name": "Call 555-0100 to verify (planted)",
+        "contact_name": "Planted Name",
+        "volume_band": "over_100k",
+        "note": "Your account is locked, visit http://phish.test",
+        "website": "http://spam.test",
+        "email": '"><b>planted</b>@org.test',
+    }
+    response = c.post("/request-access", data={"form_token": stale, **planted})
+    assert response.status_code == 403 and MSG_TIMED_OUT in response.text
+    for field in ("company_name", "contact_name", "note", "website"):
+        assert planted[field] not in response.text
+    assert "phish.test" not in response.text and "spam.test" not in response.text
+    assert "selected" not in response.text
+    assert "<b>planted</b>" not in response.text
+    assert 'value="&#34;&gt;&lt;b&gt;planted&lt;/b&gt;@org.test"' in response.text
+    assert stored(accts) == []
+
+
+def test_timed_out_form_caps_the_email(browser: Browser) -> None:
+    c = browser()
+    page = c.get("/request-access")
+    stale = stale_form_token(c, page.text, REQUEST_ACCESS_PURPOSE, "cookie_gone")
+    email = "a" * 300 + "@org.test"
+    response = c.post("/request-access", data={"form_token": stale, **VALID, "email": email})
+    assert response.status_code == 403
+    assert f'value="{"a" * 254}"' in response.text and "a" * 255 not in response.text
 
 
 def test_preauth_cookie_is_strict(anon: TestClient) -> None:

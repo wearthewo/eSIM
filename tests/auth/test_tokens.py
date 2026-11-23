@@ -11,10 +11,12 @@ import pytest
 
 from app.auth.tokens import (
     FORM_TOKEN_MAX_AGE_SECONDS,
+    FormTokenStatus,
     check_form_token,
     csrf_for,
     csrf_matches,
     digest,
+    form_token_status,
     is_token_shaped,
     new_token,
     sign_form_token,
@@ -82,6 +84,62 @@ def test_form_token_rejected(case: str) -> None:
         case "empty":
             args["token"] = ""
     assert not check_form_token(args["key"], args["purpose"], args["token"], args["cookie_nonce"])
+
+
+@pytest.mark.parametrize(
+    ("case", "expected"),
+    [
+        ("ok", FormTokenStatus.OK),
+        # Ours, for this form, but too old or not this browser's: STALE.
+        ("too-old", FormTokenStatus.STALE),
+        ("from-the-future", FormTokenStatus.STALE),
+        ("other-nonce", FormTokenStatus.STALE),
+        ("no-cookie", FormTokenStatus.STALE),
+        # Everything else: INVALID, even when it is also old or has no cookie.
+        ("purpose", FormTokenStatus.INVALID),
+        ("key", FormTokenStatus.INVALID),
+        ("tampered", FormTokenStatus.INVALID),
+        ("malformed", FormTokenStatus.INVALID),
+        ("empty", FormTokenStatus.INVALID),
+        ("none", FormTokenStatus.INVALID),
+        ("old-and-other-purpose", FormTokenStatus.INVALID),
+        ("forged-without-cookie", FormTokenStatus.INVALID),
+    ],
+)
+def test_form_token_status(case: str, expected: FormTokenStatus) -> None:
+    now = time.time()
+    key, purpose, cookie = KEY, "login", NONCE
+    signed = sign_form_token(KEY, "login", NONCE, now=now)
+    token: str | None = signed
+    match case:
+        case "too-old":
+            token = sign_form_token(KEY, "login", NONCE, now=now - FORM_TOKEN_MAX_AGE_SECONDS - 1)
+        case "from-the-future":
+            token = sign_form_token(KEY, "login", NONCE, now=now + 600)
+        case "other-nonce":
+            cookie = new_token()
+        case "no-cookie":
+            cookie = None
+        case "purpose":
+            purpose = "invite:abc"
+        case "key":
+            key = b"z" * 40
+        case "tampered":
+            ts, nonce, mac = signed.split(".")
+            token = f"{int(ts) + 1000}.{nonce}.{mac}"
+        case "malformed":
+            token = "a.b"
+        case "empty":
+            token = ""
+        case "none":
+            token = None
+        case "old-and-other-purpose":
+            token = sign_form_token(KEY, "request-access", NONCE, now=now - 7200)
+        case "forged-without-cookie":
+            token, cookie = f"{int(now)}.{NONCE}.{'A' * 43}", None
+    assert form_token_status(key, purpose, token, cookie, now=now) is expected
+    accepted = check_form_token(key, purpose, token, cookie, now=now)
+    assert accepted is (expected is FormTokenStatus.OK)
 
 
 def test_form_token_expires() -> None:

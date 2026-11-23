@@ -21,6 +21,7 @@ the user id, the timestamp and the pre-auth cookie's nonce). It is valid for
 from __future__ import annotations
 
 import base64
+import enum
 import hashlib
 import hmac
 import re
@@ -76,6 +77,46 @@ def sign_form_token(key: bytes, purpose: str, nonce: str, *, now: float | None =
     return f"{timestamp}.{nonce}.{_form_mac(key, purpose, timestamp, nonce)}"
 
 
+class FormTokenStatus(enum.Enum):
+    OK = "ok"
+    # Signed by us for this purpose, but too old (or from the future), or its nonce is not
+    # this browser's pre-auth cookie (the cookie expired, was replaced, or is missing).
+    STALE = "stale"
+    # Missing, malformed, not signed by us, or signed for another purpose.
+    INVALID = "invalid"
+
+
+def form_token_status(
+    key: bytes,
+    purpose: str,
+    token: str | None,
+    cookie_nonce: str | None,
+    *,
+    now: float | None = None,
+    max_age: int = FORM_TOKEN_MAX_AGE_SECONDS,
+) -> FormTokenStatus:
+    """Why ``token`` is or is not acceptable; only ``OK`` is. ``STALE`` lets a page show the
+    form again with a fresh token instead of an error; it never lets the request through."""
+    if not token:
+        return FormTokenStatus.INVALID
+    parts = token.split(".")
+    if len(parts) != 3:
+        return FormTokenStatus.INVALID
+    timestamp, nonce, mac = parts
+    if not timestamp.isascii() or not timestamp.isdigit():
+        return FormTokenStatus.INVALID
+    try:
+        expected = _form_mac(key, purpose, timestamp, nonce)
+    except UnicodeEncodeError:  # lone surrogates
+        return FormTokenStatus.INVALID
+    if not hmac.compare_digest(mac.encode(), expected.encode()):
+        return FormTokenStatus.INVALID
+    if not cookie_nonce or not hmac.compare_digest(nonce.encode(), cookie_nonce.encode()):
+        return FormTokenStatus.STALE
+    age = (time.time() if now is None else now) - int(timestamp)
+    return FormTokenStatus.OK if 0 <= age <= max_age else FormTokenStatus.STALE
+
+
 def check_form_token(
     key: bytes,
     purpose: str,
@@ -86,24 +127,8 @@ def check_form_token(
     max_age: int = FORM_TOKEN_MAX_AGE_SECONDS,
 ) -> bool:
     """True if ``token`` was signed for ``purpose``, is fresh, and carries the cookie's nonce."""
-    if not token or not cookie_nonce:
-        return False
-    parts = token.split(".")
-    if len(parts) != 3:
-        return False
-    timestamp, nonce, mac = parts
-    if not timestamp.isascii() or not timestamp.isdigit():
-        return False
-    try:
-        expected = _form_mac(key, purpose, timestamp, nonce)
-    except UnicodeEncodeError:  # lone surrogates
-        return False
-    if not hmac.compare_digest(mac.encode(), expected.encode()):
-        return False
-    if not hmac.compare_digest(nonce.encode(), cookie_nonce.encode()):
-        return False
-    age = (time.time() if now is None else now) - int(timestamp)
-    return 0 <= age <= max_age
+    status = form_token_status(key, purpose, token, cookie_nonce, now=now, max_age=max_age)
+    return status is FormTokenStatus.OK
 
 
 def _mfa_mac(key: bytes, user_id: str, timestamp: str, nonce: str) -> str:

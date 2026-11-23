@@ -28,6 +28,7 @@ from app.web.auth import (
     MSG_LINK_INVALID,
     MSG_LOGIN_FAILED,
     MSG_PASSWORDS_DIFFER,
+    MSG_TIMED_OUT,
     PREAUTH_COOKIE,
     SESSION_COOKIE,
 )
@@ -42,7 +43,12 @@ from tests.web.conftest import (
     LoggedIn,
     now,
 )
-from tests.web.management_routes import MANAGEMENT_PATHS, MANAGEMENT_POSTS
+from tests.web.management_routes import (
+    MANAGEMENT_PATHS,
+    MANAGEMENT_POSTS,
+    STALE_WAYS,
+    stale_form_token,
+)
 
 Browser = Callable[..., TestClient]
 NEW_PASSWORD = "a brand new synthetic passphrase"
@@ -539,6 +545,66 @@ def test_login_requires_form_token(browser: Browser, accts: Accounts) -> None:
     assert accts.sql("SELECT count(*) FROM audit_log WHERE action = 'login'") == [(1,)]
 
 
+@pytest.mark.parametrize("how", STALE_WAYS)
+def test_login_timed_out_form_is_shown_again(browser: Browser, accts: Accounts, how: str) -> None:
+    user_id = accts.user()
+    c = browser()
+    page = c.get("/login")
+    stale = stale_form_token(c, page.text, auth.LOGIN_PURPOSE, how)
+    response = c.post("/login", data={"form_token": stale, "email": EMAIL, "password": PASSWORD})
+
+    # Still refused: no password check, no session, nothing audited.
+    assert response.status_code == 403
+    assert SESSION_COOKIE not in response.cookies
+    assert _sessions_of(accts, user_id) == []
+    assert accts.sql("SELECT count(*) FROM audit_log") == [(0,)]
+    # The same form again, with the email kept and never the password.
+    assert response.headers["cache-control"] == "no-store"
+    assert MSG_TIMED_OUT in response.text and MSG_FORBIDDEN not in response.text
+    assert 'action="/login"' in response.text
+    assert f'name="email" required autocomplete="username" maxlength="254" value="{EMAIL}"' in (
+        response.text
+    )
+    assert PASSWORD not in response.text
+    assert PREAUTH_COOKIE in response.cookies
+    # Its fresh token works.
+    fresh = _form_token(response.text)
+    assert fresh != stale
+    assert _login(c, form_token=fresh).status_code == 303
+    assert len(_sessions_of(accts, user_id)) == 1
+
+
+def test_login_timed_out_form_escapes_the_email(browser: Browser) -> None:
+    c = browser()
+    page = c.get("/login")
+    stale = stale_form_token(c, page.text, auth.LOGIN_PURPOSE, "cookie_gone")
+    email = '"><b>x</b>@org.test'
+    response = c.post("/login", data={"form_token": stale, "email": email, "password": "p"})
+    assert response.status_code == 403 and MSG_TIMED_OUT in response.text
+    assert "<b>x</b>" not in response.text
+    assert 'value="&#34;&gt;&lt;b&gt;x&lt;/b&gt;@org.test"' in response.text
+
+
+@pytest.mark.parametrize("bad", ["missing", "tampered", "other_form"], ids=lambda b: f"token_{b}")
+def test_login_with_a_bad_token_is_still_a_plain_403(
+    browser: Browser, accts: Accounts, bad: str
+) -> None:
+    accts.user()
+    c = browser()
+    token = _form_token(c.get("/login").text)
+    data = {"email": EMAIL, "password": PASSWORD}
+    if bad == "tampered":
+        data["form_token"] = token + "x"
+    elif bad == "other_form":
+        data["form_token"] = sign_form_token(
+            TEST_SECRET_KEY.encode(), "request-access", c.cookies[PREAUTH_COOKIE]
+        )
+    response = c.post("/login", data=data)
+    assert response.status_code == 403
+    assert response.text == MSG_FORBIDDEN
+    assert accts.sql("SELECT count(*) FROM audit_log") == [(0,)]
+
+
 def test_login_form_body_is_capped(anon: TestClient) -> None:
     response = anon.post("/login", data={"email": "x" * (auth.MAX_FORM_BYTES + 1)})
     assert response.status_code == 413
@@ -640,6 +706,62 @@ def test_set_password_requires_form_token(browser: Browser, accts: Accounts) -> 
     # A form token for another link is not accepted.
     assert c.post(f"/invite/{token}", data={**data, "form_token": other_form}).status_code == 403
     assert _set_password(c, token).status_code == 303
+
+
+@pytest.mark.parametrize("how", STALE_WAYS)
+def test_set_password_timed_out_form_is_shown_again(
+    browser: Browser, accts: Accounts, how: str
+) -> None:
+    token = _invite(accts, accts.org())
+    c = browser()
+    page = c.get(f"/invite/{token}")
+    stale = stale_form_token(c, page.text, auth._link_purpose(token), how)
+    data = {"password": NEW_PASSWORD, "password_confirm": NEW_PASSWORD}
+    response = c.post(f"/invite/{token}", data={"form_token": stale, **data})
+
+    # Still refused: the link is not used, no session.
+    assert response.status_code == 403
+    assert SESSION_COOKIE not in response.cookies
+    assert _audit(accts) == []
+    # The same form again: the account's email, never the passwords.
+    assert response.headers["cache-control"] == "no-store"
+    assert MSG_TIMED_OUT in response.text and MSG_FORBIDDEN not in response.text
+    assert f'action="/invite/{token}"' in response.text
+    assert "new.member@org.test" in response.text
+    assert NEW_PASSWORD not in response.text
+    # Its fresh token works, and the link with it.
+    fresh = _form_token(response.text)
+    assert fresh != stale
+    done = c.post(f"/invite/{token}", data={"form_token": fresh, **data})
+    assert done.status_code == 303 and done.headers["location"] == "/"
+
+
+def test_set_password_timed_out_on_a_dead_link_is_the_invalid_link_page(
+    browser: Browser, accts: Accounts
+) -> None:
+    token = _invite(accts, accts.org())
+    c = browser()
+    page = c.get(f"/invite/{token}")
+    stale = stale_form_token(c, page.text, auth._link_purpose(token), "cookie_gone")
+    accts.sql("UPDATE invites SET expires_at = now() - interval '1 second' RETURNING id")
+    data = {"form_token": stale, "password": NEW_PASSWORD, "password_confirm": NEW_PASSWORD}
+    response = c.post(f"/invite/{token}", data=data)
+    assert response.status_code == 404 and MSG_LINK_INVALID in response.text
+    assert MSG_TIMED_OUT not in response.text
+
+
+def test_set_password_with_a_bad_token_is_still_a_plain_403(
+    browser: Browser, accts: Accounts
+) -> None:
+    token = _invite(accts, accts.org())
+    c = browser()
+    form = _form_token(c.get(f"/invite/{token}").text)
+    data = {"password": NEW_PASSWORD, "password_confirm": NEW_PASSWORD}
+    for bad in (None, form + "x"):
+        sent = data if bad is None else {**data, "form_token": bad}
+        response = c.post(f"/invite/{token}", data=sent)
+        assert response.status_code == 403 and response.text == MSG_FORBIDDEN
+    assert _audit(accts) == []
 
 
 def test_reset_link_ends_other_sessions(

@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import re
+import time
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from tests.web.conftest import Accounts
+from app.auth.tokens import FORM_TOKEN_MAX_AGE_SECONDS, sign_form_token
+from app.web.auth import PREAUTH_COOKIE
+from tests.web.conftest import TEST_SECRET_KEY, Accounts
 
 ADMIN_GETS = ["/admin", "/admin/requests", "/admin/orgs", "/admin/orgs/{org_id}"]
 ADMIN_POSTS = [
@@ -62,6 +65,25 @@ def form_token(html: str) -> str:
     match = FORM_TOKEN.search(html)
     assert match, "no form token on the page"
     return match.group(1)
+
+
+STALE_WAYS = ("token_too_old", "cookie_gone")
+
+
+def stale_form_token(c: TestClient, page_html: str, purpose: str, how: str) -> str:
+    """A genuine form token for ``purpose`` that the server must refuse as timed out:
+    signed over an hour ago (``token_too_old``), or the page's own token after this
+    browser lost its pre-auth cookie (``cookie_gone``, as when the cookie expires)."""
+    if how == "token_too_old":
+        return sign_form_token(
+            TEST_SECRET_KEY.encode(),
+            purpose,
+            c.cookies[PREAUTH_COOKIE],
+            now=time.time() - FORM_TOKEN_MAX_AGE_SECONDS - 1,
+        )
+    assert how == "cookie_gone", how
+    c.cookies.delete(PREAUTH_COOKIE)
+    return form_token(page_html)
 
 
 def use_link(c: TestClient, token: str) -> int:
