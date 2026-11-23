@@ -236,11 +236,28 @@ A daily purge inside the app deletes what is past its period, so no cron job is 
 
 ## Performance
 
-Measured on the development machine (Intel Core, Windows 11, Python 3.14) with
-`scripts/bench.py`, end to end through the real app. The Render figures are estimates:
-they assume a Render vCPU is 1.0 to 1.5 times slower than this machine's core.
+**Measured in production** on 23 November 2026: Render Starter (0.5 CPU, 512 MB,
+Frankfurt), a 10,000-row order from the synthetic `output/big_10000.csv` (Greek names
+from a pool), downloaded in folder mode in Chrome.
 
-| Measure | Result |
+| Measure (production, Render Starter) | Result |
+|---|---|
+| 10,000-row order: all 20 parts of 500 | about 5–6 min |
+| Per part | about 15–18 s |
+| Memory, idle | about 100–130 MB |
+| Memory, peak while generating | about 160 MB (about 31% of 512 MB) |
+| CPU while generating | about 40–60% of the 0.5 CPU limit (per-minute averages) |
+| CPU, idle | near 0% |
+
+How this was measured: the times are wall-clock, timed by hand, and include one Cancel
+at part 5 followed by Resume. Memory and CPU are read off Render's Metrics graphs, which
+plot per-minute averages, so short peaks are smoothed out. Treat these figures as
+approximate: one run, read by eye, not a repeated benchmark.
+
+**Measured locally** on the development machine (Intel Core, Windows 11, Python 3.14)
+with `scripts/bench.py`, end to end through the real app:
+
+| Measure (local) | Result |
 |---|---|
 | Per PDF, ASCII names | 12.8–13.5 ms, 5–12 KB |
 | Per PDF, Greek names | 21.1–22.0 ms, 28–35 KB |
@@ -248,10 +265,14 @@ they assume a Render vCPU is 1.0 to 1.5 times slower than this machine's core.
 | 10,000-row order: all 20 parts | 213–216 s, 282 MB of ZIPs |
 | 10,000-row order: peak process memory | 261 MB |
 | Cached rows | about 700 bytes per row (6.7 MB for 10,000) |
-| 10,000-row order on Render Starter (0.5 CPU), estimate | 7–10.5 min |
-| 10,000-row order on Render Standard (1 CPU), estimate | 3.5–5.3 min |
+| 10,000-row order on Render Standard (1 CPU), estimate, not measured | 3.5–5.3 min |
 
-The details, including a 100,000-row benchmark, are in
+The local peak memory is higher than production's because the benchmark drives the app
+with `TestClient` in the same process, so it also holds the client's copies of the file
+and the ZIPs. The Render Standard figure is an estimate, not measured (it assumes a
+Render vCPU is 1.0 to 1.5 times slower than this machine's core). The same model
+overestimated Starter (predicted 7-10.5 min, measured about 5-6 min), so this is
+probably high. The details, including a 100,000-row benchmark, are in
 [Size and speed](#size-and-speed).
 
 ## Quality
@@ -836,10 +857,16 @@ thread-safe.
   Parts of 1,000 are not faster (211-222 s), so new batches keep 500.
 - Cached rows: about 700 bytes per row, 6.7 MB for 10,000 rows (UPLOAD_CACHE_MB,
   default 100).
-- Estimated on Render: Starter (0.5 CPU) 7-10.5 min, Standard (1 CPU) 3.5-5.3 min.
-  The script measures CPU time per stage and assumes a Render vCPU is 1.0-1.5x
-  slower than this machine's core; `scripts/bench.py --core --rows 500` on the
-  instance calibrates that factor.
+- Measured in production on Render Starter (0.5 CPU, 512 MB) on 23 November 2026:
+  about 5-6 min for the whole order (15-18 s per part), memory peak about 160 MB, CPU
+  about 40-60% of the limit while generating. Timed by hand and read off Render's
+  Metrics graphs (per-minute averages); see [Performance](#performance). This replaces
+  the earlier Starter estimate of 7-10.5 min.
+- Estimated on Render Standard (1 CPU): 3.5-5.3 min, not measured. The script measures
+  CPU time per stage and assumes a Render vCPU is 1.0-1.5x slower than this machine's
+  core; `scripts/bench.py --core --rows 500` on the instance calibrates that factor.
+  The same model overestimated Starter (predicted 7-10.5 min, measured about 5-6 min),
+  so this is probably high.
 
 **A 100,000-row order** (`scripts/bench.py --rows 100000 --names pool`, Greek names,
 200 parts of 500; the limits are raised for the benchmark only):
@@ -854,8 +881,11 @@ thread-safe.
 | ZIPs | 2.82 GB (14.1 MB per part) |
 | Cached rows | 67 MB (about 700 bytes per row) |
 | Peak process memory | 570 MB |
-| Estimate on Starter (0.5 CPU) | 75-112 min |
-| Estimate on Standard (1 CPU) | 38-56 min |
+| Render Starter (0.5 CPU), estimate only | 75-112 min |
+| Render Standard (1 CPU), estimate only | 38-56 min |
+
+The Render rows above are estimates from the local CPU times, not measurements: a
+100,000-row order cannot run in production, because MAX_ROWS stays 10,000.
 
 - The 570 MB peak includes the benchmark client's own copies of the 19 MB file.
   Measured separately, parsing 100,000 rows peaks at 194 MB and the duplicate check
@@ -868,9 +898,9 @@ thread-safe.
 
 **Waiting for a slot**: with GENERATE_SLOTS=1, a part requested while another part is
 being generated queues for up to GENERATE_WAIT_SECONDS (default 60) instead of being
-refused at once. One part of 500 Greek-name rows takes about 21-32 s on Starter (the
-estimate above, per part), so a second user's part waits its turn behind one running
-part. Only after the wait does it get 503 "Server busy" with `Retry-After: 60`.
+refused at once. One part of 500 Greek-name rows takes about 15-18 s on Starter
+(measured in production, see above), so a second user's part waits its turn behind one
+running part. Only after the wait does it get 503 "Server busy" with `Retry-After: 60`.
 
 </details>
 
