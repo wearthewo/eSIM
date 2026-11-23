@@ -78,7 +78,7 @@ services:
       # (a Dashboard change to this value would be undone by the next Blueprint sync).
       # README, "Email".
       - key: EMAIL_BACKEND
-        value: none
+        value: resend
       - key: GENERATE_SLOTS
         value: "1"
       - key: UPLOAD_CACHE_MB
